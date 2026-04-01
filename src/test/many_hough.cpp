@@ -5,21 +5,32 @@
 int main() {
     std::cout << "=== Temporal Centerline Fitter - Multi-Frame Processing ===" << std::endl;
     
-    int width = 800;
-    int height = 600;
-    int num_frames = 60;  // 处理30帧
+    int width = 1920;
+    int height = 1080;
+    int num_frames = 100;  // 处理30帧
     
     // 生成测试图像序列
     std::cout << "Generating test sequence with " << num_frames << " frames..." << std::endl;
-    auto sequence = generateTestSequence(num_frames, width, height);
+    // std::vector<cv::Mat> sequence = generateTestSequence(num_frames, width, height);
+    std::vector<cv::Mat> sequence;
+    for(int i=100;i<201;i++)
+    {
+        cv::Mat image = cv::imread("/home/gq/guoqian/findPath/test_image/"+std::to_string(i)+".jpg");
+        if (image.channels() == 3)
+        {
+            cv::cvtColor(image, image, cv::COLOR_BGR2GRAY);
+        }
+        threshold(image, image, 120, 255, 0);
+        sequence.push_back(image);
+    }
     std::cout << "Sequence generated successfully!" << std::endl;
     
     // 创建时序拟合器
     TemporalCenterlineFitter fitter(10, 0.05, true);   // 保留10帧历史，启用调试
     
     // 车辆位置
-    double vehicle_x = width / 2.0 * 0.05;
-    double vehicle_y = (height - 50) * 0.05;
+    double vehicle_x = (width + 50)/ 2.0 * 0.05;
+    double vehicle_y = (height - 80) * 0.05;
     fitter.setVehiclePosition(vehicle_x, vehicle_y);
     
     // 处理每一帧

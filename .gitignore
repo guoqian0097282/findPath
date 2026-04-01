@@ -226,3 +226,4 @@ DNN_test/DNN_result2/*
 workspace/src/path_optimizer_ilqr/log/*
 
 ./build/*
+*.jpg

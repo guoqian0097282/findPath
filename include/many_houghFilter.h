@@ -97,7 +97,7 @@ private:
         int vehicle_py = std::max(0, std::min(height - 1, (int)(vehicle_y_ / resolution_)));
         
         // 扫描参数
-        int scan_start_y = std::max(0, vehicle_py - 300);
+        int scan_start_y = std::max(0, vehicle_py - 1080);
         int scan_end_y = vehicle_py;
         int scan_step = 5;
         

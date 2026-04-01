@@ -6,8 +6,8 @@ int main() {
     std::cout << "=== Fixed Centerline Extractor ===" << std::endl;
     
     // 创建测试道路
-    int width = 800;
-    int height = 600;
+    int width = 1920;
+    int height = 1080;
     cv::Mat road = cv::Mat::zeros(height, width, CV_8UC1);
     
     // 定义道路边界（像素坐标）

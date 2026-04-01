@@ -7,13 +7,25 @@ set(CMAKE_CXX_FLAGS " -Wall -Wextra ${CMAKE_CXX_FLAGS}")
 set(CMAKE_BUILD_TYPE "Debug")
 
 
-find_package(OsqpEigen REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV 3 REQUIRED)
 
+
+# # for x86 build
+set(OsqpEigen_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-eigen-0.4.1/lib/cmake/OsqpEigen)
+include_directories(${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-eigen-0.4.1/include/OsqpEigen)
+set(gflags_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-eigen-0.4.1/lib/cmake/OsqpEigen)
+include_directories(${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/gflags-2.2.2/include/gflags)
+set(osqp_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-0.5.0/lib/cmake/osqp)
+include_directories(${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-0.5.0/include)
+
+find_package(osqp REQUIRED)
+find_package(gflags REQUIRED)
+find_package(OsqpEigen REQUIRED)
+
 include_directories(
         include
-        include/speed/include
+        include/speed/
         ${OpenCV_INCLUDE_DIRS}
         ${EIGEN3_INCLUDE_DIR}
 )
@@ -53,12 +65,34 @@ add_library(${PROJECT_NAME}
 
         src/tinyspline_ros/tinyspline.c
         src/tinyspline_ros/tinysplinecpp.cpp
-        src/test/j3_perception_data_api.cpp
-        src/test/J3xmlfile.cpp        
-        src/test/run_code.cpp
-        src/test/tinyxml2.cpp
         src/bezier.cpp
         src/curve.cpp
+
+        src/speed/box2d.cpp
+        src/speed/discretized_path.cpp
+        src/speed/dp_st_cost.cpp
+        src/speed/frenet_frame_path.cpp
+        src/speed/gridded_path_time_graph.cpp
+        src/speed/line_segment2d.cpp
+        src/speed/linear_interpolation.cpp
+        src/speed/math_utils.cpp
+        src/speed/obstacle.cpp
+        src/speed/path_data.cpp
+        src/speed/piecewise_jerk_problem.cpp
+        src/speed/piecewise_jerk_speed_problem.cpp
+        src/speed/planning_gflags.cpp
+        src/speed/polygon2d.cpp
+        src/speed/speed_data.cpp
+        src/speed/speed_limit.cpp
+        src/speed/speed_optimizer.cpp
+        src/speed/speed_profile_generator.cpp
+        src/speed/st_boundary.cpp
+        src/speed/st_graph_data.cpp
+        src/speed/st_graph_point.cpp
+        src/speed/st_obstacles_processor.cpp
+        src/speed/st_point.cpp
+        src/speed/util.cpp
+        src/speed/vec2d.cpp
         )
 target_link_libraries(${PROJECT_NAME}  gflags OsqpEigen::OsqpEigen osqp::osqp
         )
@@ -66,19 +100,8 @@ target_link_libraries(${PROJECT_NAME}  gflags OsqpEigen::OsqpEigen osqp::osqp
 add_executable(final
         src/test/final.cpp)
 target_link_libraries(final
-        ${PROJECT_NAME} ${OpenCV_LIBRARIES}
+        ${PROJECT_NAME} ${OpenCV_LIBRARIES} 
         )
-add_executable(final_global
-        src/test/final_global.cpp)
-target_link_libraries(final_global
-        ${PROJECT_NAME} ${OpenCV_LIBRARIES}
-        )
-add_executable(final_test
-        src/test/final_test.cpp)
-target_link_libraries(final_test
-        ${PROJECT_NAME} ${OpenCV_LIBRARIES}
-        )
-
 
 add_executable(hough_main
         src/test/hough_main.cpp)
@@ -101,5 +124,18 @@ target_link_libraries(advance_filter
 add_executable(many_hough
         src/test/many_hough.cpp)
 target_link_libraries(many_hough
+        ${PROJECT_NAME} ${OpenCV_LIBRARIES}
+        )
+
+add_executable(regularI_main
+        src/test/regularI_main.cpp)
+target_link_libraries(regularI_main
+        ${PROJECT_NAME} ${OpenCV_LIBRARIES}
+        )
+
+
+add_executable(main
+        src/test/main.cpp)
+target_link_libraries(main
         ${PROJECT_NAME} ${OpenCV_LIBRARIES}
         )
