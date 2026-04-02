@@ -14,8 +14,10 @@ find_package(OpenCV 3 REQUIRED)
 # # for x86 build
 set(OsqpEigen_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-eigen-0.4.1/lib/cmake/OsqpEigen)
 include_directories(${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-eigen-0.4.1/include/OsqpEigen)
-set(gflags_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-eigen-0.4.1/lib/cmake/OsqpEigen)
+
+set(gflags_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/gflags-2.2.2/lib/cmake/gflags)
 include_directories(${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/gflags-2.2.2/include/gflags)
+
 set(osqp_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-0.5.0/lib/cmake/osqp)
 include_directories(${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/x86/osqp-0.5.0/include)
 

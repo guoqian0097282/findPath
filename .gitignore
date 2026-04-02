@@ -227,3 +227,4 @@ workspace/src/path_optimizer_ilqr/log/*
 
 ./build/*
 *.jpg
+token.txt

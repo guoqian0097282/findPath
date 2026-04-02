@@ -90,6 +90,26 @@ extern "C"
         double a;
     } T_lqrPose;
 
+    typedef struct
+    {
+        float fPointX; //mm
+        float fPointY; //mm
+        float fAngle; //0.1^
+    }Road_Det_Track_PointType;
+    #define ROAD_DET_TRACK_POINTNUM 50  //10m
+    typedef struct _IpcSignal_Road_Det_TrackType
+    {
+        uint32_t u32TimeStamp;
+        Road_Det_Track_PointType CarPoint;
+        Road_Det_Track_PointType sDetTrackPoint[ROAD_DET_TRACK_POINTNUM];
+        int8_t s8RoadDirection;
+        int8_t s8isRoadWide;
+        uint16_t u16RoadWidth;
+        int8_t s8CruiseSceneMark;
+        uint8_t u8rev;
+        uint16_t u16rev;
+    }IpcSignal_Road_Det_TrackType;
+
 #define LH_PATHPLANNING_ALG_VERSION ("LH-PAHTPLAN-V1.51") // pathplanning算法版本号
 
     static cv::Mat g_sFreeSpaceGray;      // 输入freespace, 只申请一次空间，避免频繁申请释放空间产生内存碎片
@@ -307,6 +327,15 @@ extern "C"
         if (result_path.size() < 50)
         {
             interval = 5;
+        }
+        if(result_path.size() < 15)
+        {
+            vector<double> smoothPath;
+            for(int i=0;i<result_path.size();i++)
+            {
+                smoothPath.push_back(0);
+            }
+            return smoothPath;
         }
         vector<double> curvature_list(result_path.size(), 0.0);
 
@@ -769,16 +798,11 @@ int main()
 {
     //先进行变量的初始化
     InitPathPlanning();
-    std::cout << "============================================================" << std::endl;
-    std::cout << "Complete Centerline Extraction System" << std::endl;
-    std::cout << "Multi-frame | Temporal Fitting | Start Alignment" << std::endl;
-    std::cout << "1920x1080 | 0.1m/pixel | Full Vertical Coverage" << std::endl;
-    std::cout << "============================================================\n" << std::endl;
     
     // 参数配置
     int width = 1920;  //图像宽
     int height = 1080; //图像高
-    int num_frames = 100;   //图像数量
+    int num_frames = 400;   //图像数量
     double resolution = 0.01;  //图像分辨率
     bool debug = true;
     int max_history = 15;  //最大参考帧，用于时序平滑中心点的寻找
@@ -787,8 +811,11 @@ int main()
     std::cout << "\nGenerating test sequence..." << std::endl;
     // auto sequence = generateTestSequence(num_frames, width, height);
     std::vector<cv::Mat> sequence;
-    for(int i=100;i<200;i++)
+    for(int i=100;i<500;i++)
     {
+        width = 1920;  //图像宽
+        height = 1080; //图像高
+        resolution = 0.01;  //图像分辨率
         //选取某一帧作为测试图像
         cv::Mat image = cv::imread("/home/gq/guoqian/findPath/test_image/" + to_string(i) + ".jpg");
         //如果图像为空，直接返回规划失败
@@ -804,20 +831,8 @@ int main()
         }
         threshold(image, image, 120, 255, 0);
         // 道路宽度最多是6米，所以对图像超出6米范围的区域进行不可同行区域的处理，方便寻找中心线
-        for (int i = 960 + 300; i < 1920; i++)
-        {
-            for (int j = 0; j < 1080; j++)
-            {
-                image.at<uchar>(j, i) = 0;
-            }
-        }
-        for (int i = 0; i < 960 - 300; i++)
-        {
-            for (int j = 0; j < 1080; j++)
-            {
-                image.at<uchar>(j, i) = 0;
-            }
-        }
+        image.colRange(width/2+300,width).setTo(0);
+        image.colRange(0,width/2-300).setTo(0);
         sequence.push_back(image);
     }
     std::cout << "  Generated " << sequence.size() << " frames" << std::endl;
@@ -916,7 +931,7 @@ int main()
         }
         
         // 可视化
-        if (frame_id % 3 == 0) {
+        if (frame_id % 1 == 0) {
             visualizer.show(sequence[frame_id], fused.points, vehicle_pos, frame_id, fused.lateral_offset);
         }
         //打印找到的中心点信息
@@ -931,9 +946,19 @@ int main()
         //}
         //定义车辆的全局坐标信息，即里程计坐标
         T_CarState tCarState;
-        tCarState.dX = 10;
-        tCarState.dY = 50;
-        tCarState.dTheta = 30/180*3.14;
+        if(LocalPathRefer.size() < 1)
+        {
+            tCarState.dX = 0;
+            tCarState.dY = 0;
+            tCarState.dTheta = 0;            
+        }else
+        {
+            int over_start = std::max(0,(int)LocalPathRefer.size()-30);
+            tCarState.dX = LocalPathRefer[over_start].x;
+            tCarState.dY = LocalPathRefer[over_start].y;
+            tCarState.dTheta = LocalPathRefer[over_start].heading;  
+        }
+
         char tempFile = './pathTemp.txt';
         std::vector<T_Obs> Obs;
         //############################################begin path plan#########################
@@ -955,11 +980,12 @@ int main()
     {
         clock_t time1 = clock();
         // std::cout << "Lidar info object num: " << std::endl;
+        resolution = 0.01;
         imageId++;
         bool shortPath = false; //用于判断剩余路径是不是过短，及时进行局部路径的重规划
         // draw map
         Mat new_map;
-        int index = 0; //参考路经的起点从第20个点开始
+        int index = 5; //参考路经的起点从第20个点开始
         localIndex = 0; //用于记录上次局部规划轨迹与当前车辆的位置关系
         // find the path respecting point
         globalPathPoints.clear(); //将找到的中心点放到全局规划的参考路径中，注意，中心点的坐标y是从上到下
@@ -974,18 +1000,6 @@ int main()
             point[5] = centerPoints[i].road_width;
             globalPathPoints.push_back(point);
 
-        }
-        //The last local path ,
-        //如果LocalPathRefer不为0，说明上次局部轨迹存储到里面，找出当前车辆相对于上次轨迹的位置，用于多段轨迹的衔接
-        double minLocalDis = 10000;
-        for (int i = 0; i < LocalPathRefer.size(); i++)
-        {
-            double distance = pow((tCarState.dX - LocalPathRefer[i].x), 2) + pow((tCarState.dY - LocalPathRefer[i].y), 2);
-            if (distance < minLocalDis)
-            {
-                minLocalDis = distance;
-                localIndex = i;
-            }
         }
         //第一次轨迹规划，或者轨迹更新之后，进行初始车辆位置的刷新
         int iRet = PathPlan_OK;
@@ -1018,15 +1032,13 @@ int main()
             std::cout << "imageId: " << imageId << std::endl;
             // imwrite("/app/slam/" + to_string(imageId) + "J3map.jpg", new_map); // 保存图
             // 4.补全车前的盲区
-            for (int i = 560; i < 1360; i++)
+            cv::Rect roi(560,800,800,280);
+            if(roi.x+roi.width <= new_map.cols && roi.y+roi.height <= new_map.rows)
             {
-                for (int j = 800; j < 1080; j++)
-                {
-                    new_map.at<uchar>(j, i) = 255;
-                }
+               new_map(roi).setTo(255); 
             }
-            cv::Mat warped_cut = new_map(cv::Rect(0, 100, 1920, 980));
-            cv::copyMakeBorder(warped_cut, new_map, 0, 100, 0, 0, cv::BORDER_CONSTANT, cv::Scalar(255, 255, 255));
+            // cv::Mat warped_cut = new_map(cv::Rect(0, 100, 1920, 980));
+            // cv::copyMakeBorder(warped_cut, new_map, 0, 100, 0, 0, cv::BORDER_CONSTANT, cv::Scalar(255, 255, 255));
             // cv::imshow("binaryImage", new_map);
             // cv::waitKey(0);
             // read original path
@@ -1044,34 +1056,47 @@ int main()
             // 2. binaryImage to get Areas of exercise
             vector<Point> points;
             double cropX;
+            double cropY;
             cv::Mat img_src;
             findNonZero(new_map, points); //用于去除图像中黑色区域，加快规划速度，但会改变图像的大小
-            // double ori_height = new_map.size().height;
-            // double ori_width = new_map.size().width
-            // if (points.empty())
-            // {
+            double ori_height = new_map.size().height;
+            double ori_width = new_map.size().width;
+            if (points.empty())
+            {
                 img_src = new_map;
-            // else
-            // {
-            //     Rect bb = boundingRect(points);
-            //     // std::cout << bb.x << bb.width << std::endl;
-            //     img_src = new_map(bb);
+            }
+            else
+            {
+                Rect bb = boundingRect(points);
+                // std::cout << bb.x << bb.width << std::endl;
+                img_src = new_map(bb);
                 height = img_src.size().height;
                 width = img_src.size().width;
-            //     cropX = bb.x;
-            // }
+                cropX = bb.x;
+                cropY = bb.y;
+                for(int i=0;i<pathPoints.size();i++)
+                {
+                    pathPoints[i][0] = pathPoints[i][0] - cropX*resolution;
+                }
+            }
             // cv::imshow("image",img_src);
             // cv::waitKey(0);
+            cv::Size scaleSize(width/10,height/10);
+            cv::resize(img_src,img_src,scaleSize,0,0,cv::INTER_AREA);
+            width = width/10;
+            height = height/10;
+            resolution = resolution*10;
             // 6. 选取终点,设定候选目标半径为 高度减1米
             cv::Mat circleImage(img_src.size(), CV_8UC1, Scalar(0));
-            double targetPixel = height-100;
+            int meter = 1/resolution;
+            double targetPixel = height-meter;
             vector<Point2d> centerPoint;
-            double downpixel = 50;
+            double downpixel = 0.5/resolution;
             while (centerPoint.size() == 0)
             {
-                if (targetPixel - downpixel < 100)
+                if (targetPixel - downpixel < meter)
                 {
-                    targetPixel = downpixel + 100;
+                    targetPixel = downpixel + meter;
                 }
 
                 circle(circleImage, Point(width / 2, height), targetPixel - downpixel, Scalar(255), 30);
@@ -1086,21 +1111,23 @@ int main()
                 for (int i = 0; i < contours.size(); i++)
                 {
                     // std::cout << cv::contourArea(contours[i]) << std::endl;
-                    if (cv::contourArea(contours[i]) > 5000)
+                    if (cv::contourArea(contours[i]) > 50/resolution)
                     {
                         Moments M;
                         Point2d point;
                         M = moments(contours[i]);
                         point.x = double(M.m10 / M.m00);
                         point.y = double(M.m01 / M.m00);
-                        if(point.x < width/2+400 && point.x > width/2-400 && point.y < height/2)
+                        int a = width/2+4/resolution;
+                        int b = width/2-4/resolution;
+                        if(point.x < a && point.x > b && point.y < height/2)
                             centerPoint.push_back(point);
                         // circle(interSection, point, 5, Scalar(0, 0, 0), -1);
                         // std::cout<<point<<std::endl;
                     }
                 }
                 downpixel = downpixel * 2;
-                if (downpixel > 300)
+                if (downpixel > 3/resolution)
                 {
                     break;
                 }
@@ -1147,7 +1174,7 @@ int main()
                 }
                 else
                 {
-                    endIndex = pathPoints.size() - 10;
+                    endIndex = pathPoints.size() - 20;
                 }
                 
             }
@@ -1161,11 +1188,6 @@ int main()
             {
                 iRet = PathPlan_FAILED;
                 return iRet;
-            }
-            //localIndex暂时没用，后面补充
-            if (localIndex > 0)
-            {
-                std::cout << "refer Local Point: " << LocalPathRefer[localIndex].x << "," << LocalPathRefer[localIndex].y << "," << LocalPathRefer[localIndex].k << std::endl;
             }
             // global to local
             Point2d pixelpathPoint, endCentrPoint, endCentrPoint1, endCentrPoint2;
@@ -1255,7 +1277,7 @@ int main()
             // set start state
             //将起点向上挪2米，不然车辆会检测到碰撞
             start_state.x = (-height / 2) * resolution;
-            start_state.y = 0 * resolution;
+            start_state.y = (width / 2 - (ori_width/2 - cropX)/10) * resolution;
             // set end state 局部轨迹规划的终点做标
             end_state.x = endpixelPoint.x * resolution;
             end_state.y = endpixelPoint.y * resolution;
@@ -1304,6 +1326,12 @@ int main()
                     }
                 }
                 std::cout << "referDistancenum: " << referDistancenum << std::endl;
+                if(referDistancenum < 6)
+                {
+                    std::cout<<"refer point is close to obstacle"<<std::endl;
+                    iRet = PathPlan_FAILED;
+                    return  iRet;
+                }
                 // calcualte distance from obstacle
                 bool opt_ok = path_optimizer.solve(reference_path_plot, &result_path);
                 std::cout << "plan state: " << opt_ok << std::endl;
@@ -1338,9 +1366,10 @@ int main()
             double disX, disY;
             PathOptimizationNS::State state;
             std::cout << "angle: " << angle << std::endl;
-            // double localX = LocalPathRefer[localIndex + 3].x;
-            // double localY = LocalPathRefer[localIndex + 3].y;
             LocalPath.clear();
+            cv::Mat img_src2;
+            cv::Size sizeOri(width*10,height*10);
+            cv::resize(img_src,img_src2,sizeOri,0,0,cv::INTER_AREA);
             for (size_t i = 0; i < result_path.size() - 1; i = i + 1)
             {
                 //将规划的局部轨迹转换到全局坐标系
@@ -1348,27 +1377,93 @@ int main()
                 disX = (path_point.x - start_state.x) * cos(angle) + (path_point.y - start_state.y) * sin(angle);
                 disY = -(path_point.x - start_state.x) * sin(angle) + (path_point.y - start_state.y) * cos(angle);
 
-                if (localIndex > 0 )
-                {
-                    state.x =  disX;
-                    state.y =  disY;
-                }
-                else
-                {
-                    state.x = car_state.x + disX;
-                    state.y = car_state.y + disY;
-                }
+                state.x = car_state.x + disX;
+                state.y = car_state.y + disY;
 
                 state.heading = path_point.heading + (car_state.heading - start_state.heading);
                 LocalPath.push_back(state);
                 // draw plan path to image
-                std::cout<<path_point.x<<","<<path_point.y<<std::endl;
+                // std::cout<<path_point.x<<","<<path_point.y<<std::endl;
                 double y = -path_point.x / resolution + height / 2;
                 double x = -path_point.y / resolution + width / 2;
-                cv::Point p(x, y);
-                circle(img_src, p, 1, cv::Scalar(0, 0, 0), -1);
+                cv::Point p(x*10, y*10);
+                circle(img_src2, p, 1, cv::Scalar(0, 0, 0), -1);
             }
-            if (result_path.size() < 5)
+            //// 轨迹拼接与曲率平滑
+            std::vector<PathOptimizationNS::State> smoothed_trajectory = LocalPath;
+            //如果LocalPathRefer不为0，说明上次局部轨迹存储到里面，找出当前车辆相对于上次轨迹的位置，用于多段轨迹的衔接
+            //1. 找到当前车辆在上一轨迹中的位置
+            double minLocalDis = 10000;
+            for (int i = 0; i < LocalPathRefer.size(); i++)
+            {
+                double distance = pow((tCarState.dX - LocalPathRefer[i].x), 2) + pow((tCarState.dY - LocalPathRefer[i].y), 2);
+                if (distance < minLocalDis)
+                {
+                    minLocalDis = distance;
+                    localIndex = i;
+                }
+            }
+            //localIndex暂时没用，后面补充
+            if (localIndex > 0)
+            {
+                std::cout << "refer Local Point: " << LocalPathRefer[localIndex].x << "," << LocalPathRefer[localIndex].y << "," << LocalPathRefer[localIndex].k << std::endl;
+                
+                // 2. 截取上一轨迹的后段作为拼接基础
+                std::vector<PathOptimizationNS::State> base_trajectory;
+                for(int i = localIndex; i < LocalPathRefer.size(); ++i) 
+                {
+                    base_trajectory.push_back(LocalPathRefer[i]);
+                }
+                // 3. 创建重叠区域
+                int overlap_length = 20;  // 重叠区域长度
+                // int overlap_start = std::max(0, (int)base_trajectory.size() - overlap_length);
+                int overlap_start = 0;
+                int overlap_end = std::min(overlap_length, (int)base_trajectory.size());
+                std::vector<PathOptimizationNS::State> overlap_region;
+                for(int i = 0; i < overlap_end; ++i) 
+                {
+                    overlap_region.push_back(base_trajectory[i]);
+                }
+                // 4. 使用加权平均平滑重叠区域
+                smoothed_trajectory = overlap_region;
+            
+                for(int i = 0; i < overlap_region.size() && i < LocalPath.size(); ++i) 
+                {
+                    double weight = (double)i / overlap_region.size();  // 线性权重
+                
+                    // 位置平滑
+                    smoothed_trajectory[overlap_start + i].x = 
+                        (1 - weight) * overlap_region[i].x + weight * LocalPath[i].x;
+                    smoothed_trajectory[overlap_start + i].y = 
+                        (1 - weight) * overlap_region[i].y + weight * LocalPath[i].y;
+                
+                    // 航向角平滑
+                    smoothed_trajectory[overlap_start + i].heading = 
+                        (1 - weight) * overlap_region[i].heading + weight * LocalPath[i].heading;
+                
+                    // 曲率平滑
+                    smoothed_trajectory[overlap_start + i].k = 
+                        (1 - weight) * overlap_region[i].k + weight * LocalPath[i].k;
+                }
+
+                // 5. 添加新轨迹的剩余部分
+                if(smoothed_trajectory.size() > 0)
+                {
+                    double lastX = smoothed_trajectory[smoothed_trajectory.size()].x;
+                    for(int i = overlap_region.size(); i < LocalPath.size(); ++i) 
+                    {
+                        if(LocalPath[i].x > lastX)
+                            smoothed_trajectory.push_back(LocalPath[i]);
+                    }
+                }else
+                {
+                    smoothed_trajectory = LocalPath;
+                }
+                // 6. 全局平滑优化 
+                // smoothed_trajectory = GlobalSmooth(smoothed_trajectory);
+            }
+
+            if (smoothed_trajectory.size() < 5)
             {
                 if (iRet != PathPlan_LASTWRITE)
                 {
@@ -1385,15 +1480,15 @@ int main()
                     // std::cout << "reference path obstacle distance: " << map.getObstacleDistance(pose) << std::endl;
                     double y = -reference_path_plot[i].x / resolution + height / 2;
                     double x = -reference_path_plot[i].y / resolution + width / 2;
-                    cv::Point p(x, y);
+                    cv::Point p(x*10, y*10);
                     // std::cout << "reference_path_plot: " << x << "," << y << std::endl;
-                    circle(img_src, p, 3, cv::Scalar(0, 0, 0), -1);
+                    circle(img_src2, p, 3, cv::Scalar(0, 0, 0), -1);
                 }
-                cv::imwrite("map_plan.jpg", img_src);
-                cv::imshow("image", img_src);
-                cv::waitKey(30);
+                cv::imwrite("map_plan.jpg", img_src2);
+                cv::imshow("image", img_src2);
+                cv::waitKey(300);
                 std::vector<PathPoint> points;
-                geneatePathPoint(LocalPath, &points);
+                geneatePathPoint(smoothed_trajectory, &points);
                 SpeedData speed_data;
                 generateSpeed(Obs, points, cur_speed, max_speed, &speed_data, tempFile);
             }

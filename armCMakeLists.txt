@@ -1,0 +1,263 @@
+cmake_minimum_required(VERSION 3.10)
+project(FindPathTest)
+# -----------------------------------------------------------------
+# setup j3 compiler tool-chains
+# -----------------------------------------------------------------
+# 添加编译平台选项
+set(BUILD_PLATFORM "j3-arm" 
+    CACHE STRING "Build platform selection (x86, j3-arm)")
+set_property(CACHE BUILD_PLATFORM 
+    PROPERTY STRINGS x86 j3-arm tda4-arm)
+
+# 根据平台选择是否包含ARM交叉编译配置
+if(BUILD_PLATFORM STREQUAL "j3-arm")
+    set(PLATFORM ${BUILD_PLATFORM})
+    # # for arm platform
+    include(cmake/arm_linux_setup.cmake)
+endif()
+
+# -----------------------------------------------------------------
+# setup Compiler
+# -----------------------------------------------------------------
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+#set(CMAKE_VERBOSE_MAKEFILE "true")
+# set(ADDITIONAL_CXX_FLAG "-O3 -g")
+set(ADDITIONAL_CXX_FLAG "-O3")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ADDITIONAL_CXX_FLAG}")
+set(CMAKE_BUILD_TYPE "Release")
+# set(CMAKE_BUILD_TYPE "Debug")
+
+
+# # for j3 build
+set(OsqpEigen_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/osqp-eigen-0.4.1/lib/cmake/OsqpEigen)
+include_directories(${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/osqp-eigen-0.4.1/include/OsqpEigen)
+
+set(gflags_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/gflags-2.2.2/lib/cmake/gflags)
+include_directories(${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/gflags-2.2.2/include/)
+
+set(osqp_DIR ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/osqp-0.5.0/lib/cmake/osqp)
+include_directories(${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/osqp-0.5.0/include)
+
+set(OpenCV_DIR ${CMAKE_SOURCE_DIR}/3rdparty/opencv-455/_install_j3_world_shared/lib/cmake/opencv4)
+set(Eigen3_DIR ${CMAKE_SOURCE_DIR}/3rdparty/eigen-340/_install_j3/share/eigen3/cmake)
+
+find_package(osqp REQUIRED)
+find_package(gflags REQUIRED)
+find_package(OsqpEigen REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(OpenCV  REQUIRED)
+
+include_directories(
+        include
+        include/speed/
+        ${OpenCV_INCLUDE_DIRS}
+        ${EIGEN3_INCLUDE_DIR}
+)
+
+add_library(
+        path_searcher SHARED
+        src/tools/tools.cpp
+        src/tools/spline.cpp
+        src/path_optimizer.cpp
+        src/tools/collision_checker.cpp
+        src/reference_path_smoother/reference_path_smoother.cpp
+        src/tools/Map.cpp
+        src/tools/car_geometry.cpp
+        src/solver/base_solver.cpp
+        src/data_struct/date_struct.cpp
+        src/data_struct/reference_path_impl.cpp
+        src/data_struct/reference_path.cpp
+        src/data_struct/vehicle_state_frenet.cpp
+        src/config/planning_flags.cpp
+        src/reference_path_smoother/tension_smoother.cpp
+        src/reference_path_smoother/tension_smoother_2.cpp
+        src/tools/time_recorder.cpp
+        
+        src/grid_map_core/GridMap.cpp
+        src/grid_map_core/GridMapMath.cpp
+        src/grid_map_core/SubmapGeometry.cpp
+        src/grid_map_core/BufferRegion.cpp
+        src/grid_map_core/Polygon.cpp
+        src/grid_map_core/CubicInterpolation.cpp
+        src/grid_map_core/iterators/GridMapIterator.cpp
+        src/grid_map_core/iterators/SubmapIterator.cpp
+        src/grid_map_core/iterators/CircleIterator.cpp
+        src/grid_map_core/iterators/EllipseIterator.cpp
+        src/grid_map_core/iterators/SpiralIterator.cpp
+        src/grid_map_core/iterators/PolygonIterator.cpp
+        src/grid_map_core/iterators/LineIterator.cpp
+        src/grid_map_core/iterators/SlidingWindowIterator.cpp
+
+        src/tinyspline_ros/tinyspline.c
+        src/tinyspline_ros/tinysplinecpp.cpp
+        src/bezier.cpp
+        src/curve.cpp
+
+        src/speed/box2d.cpp
+        src/speed/discretized_path.cpp
+        src/speed/dp_st_cost.cpp
+        src/speed/frenet_frame_path.cpp
+        src/speed/gridded_path_time_graph.cpp
+        src/speed/line_segment2d.cpp
+        src/speed/linear_interpolation.cpp
+        src/speed/math_utils.cpp
+        src/speed/obstacle.cpp
+        src/speed/path_data.cpp
+        src/speed/piecewise_jerk_problem.cpp
+        src/speed/piecewise_jerk_speed_problem.cpp
+        src/speed/planning_gflags.cpp
+        src/speed/polygon2d.cpp
+        src/speed/speed_data.cpp
+        src/speed/speed_limit.cpp
+        src/speed/speed_optimizer.cpp
+        src/speed/speed_profile_generator.cpp
+        src/speed/st_boundary.cpp
+        src/speed/st_graph_data.cpp
+        src/speed/st_graph_point.cpp
+        src/speed/st_obstacles_processor.cpp
+        src/speed/st_point.cpp
+        src/speed/util.cpp
+        src/speed/vec2d.cpp
+        )
+
+        target_link_libraries(path_searcher 
+                # ${OpenCV_LIBS} 
+                opencv_world # ${OpenCV_LIBS} 
+                # ${YAML_CPP_LIBRARIES}
+                Eigen3::Eigen 
+                osqp::osqpstatic
+                gflags
+                OsqpEigen::OsqpEigen
+                osqp::osqp
+        )
+
+        add_executable(main
+        src/test/main.cpp)
+        target_link_libraries(main  opencv_world Eigen3::Eigen gflags OsqpEigen::OsqpEigen osqp::osqp path_searcher)
+# # new
+# 安装库文件
+install(TARGETS path_searcher
+        LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+
+# 安装可执行文件
+# install(TARGETS generate_rs_path_length
+#         RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
+
+install(TARGETS main
+        RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)        
+
+# 安装头文件（供其他项目使用 path_searcher）
+install(DIRECTORY include/
+DESTINATION ${CMAKE_INSTALL_PREFIX}/include/path_searcher
+FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
+
+# 安装第三方库头文件（如果不在系统标准路径中）
+# 注意：这里需要根据你的第三方库实际安装路径来设置
+if(BUILD_PLATFORM STREQUAL "x86")
+        install(DIRECTORY 3rdparty/opencv-345/_install_x86_gcc_750/include/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/opencv)
+        install(DIRECTORY 3rdparty/eigen-340/_install_x86_gcc_750/include/eigen3/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/eigen3)
+        install(DIRECTORY 3rdparty/yaml-080/_install_x86_gcc_750/include/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/yaml-cpp)
+elseif(BUILD_PLATFORM STREQUAL "j3-arm")
+        install(DIRECTORY 3rdparty/opencv-345/_install_j3_shared/include/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/opencv)
+        install(DIRECTORY 3rdparty/eigen-340/_install_j3/include/eigen3/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/eigen3)
+        install(DIRECTORY 3rdparty/yaml-080/_install_j3/include/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/yaml-cpp)
+endif()
+
+# 安装链接的第三方库文件
+if(BUILD_PLATFORM STREQUAL "x86")
+        # 安装OpenCV库文件
+        get_target_property(OPENCV_LIBRARIES opencv_world IMPORTED_LOCATION)
+        if(OPENCV_LIBRARIES)
+        get_filename_component(OPENCV_LIB_DIR ${OPENCV_LIBRARIES} DIRECTORY)
+        # 只安装库文件，不复制目录结构
+        file(GLOB OPENCV_LIBS "${OPENCV_LIB_DIR}/libopencv*.so*")
+        install(FILES ${OPENCV_LIBS}
+                DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        endif()
+
+        # 安装yaml-cpp库文件
+        get_target_property(YAML_CPP_LIBRARY yaml-cpp::yaml-cpp IMPORTED_LOCATION)
+        if(YAML_CPP_LIBRARY)
+                get_filename_component(YAML_CPP_LIB_DIR ${YAML_CPP_LIBRARY} DIRECTORY)
+                file(GLOB YAML_CPP_LIBS "${YAML_CPP_LIB_DIR}/libyaml-cpp*.so*")
+                install(FILES ${YAML_CPP_LIBS}
+                        DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        endif()
+
+        # 安装osqp库文件
+        get_target_property(OSQP_LIBRARY osqp::osqpstatic IMPORTED_LOCATION)
+        if(OSQP_LIBRARY)
+                get_filename_component(OSQP_LIB_DIR ${OSQP_LIBRARY} DIRECTORY)
+                file(GLOB OSQP_LIBS "${OSQP_LIB_DIR}/libosqp*.so*")
+                install(FILES ${OSQP_LIBS}
+                D       ESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        endif()
+elseif(BUILD_PLATFORM STREQUAL "j3-arm")
+        message(STATUS "install <j3> 3rdparty libraries")
+
+        # 调试信息：检查所有目标属性
+        message(STATUS "Checking OpenCV target properties:")
+        get_target_property(OPENCV_TYPE opencv_world TYPE)
+        message(STATUS "  opencv_world TYPE: ${OPENCV_TYPE}")
+        get_target_property(OPENCV_IMPORTED opencv_world IMPORTED)
+        message(STATUS "  opencv_world IMPORTED: ${OPENCV_IMPORTED}")
+        get_target_property(OPENCV_LIBRARIES opencv_world IMPORTED_LOCATION)
+        message(STATUS "  opencv_world IMPORTED_LOCATION: ${OPENCV_LIBRARIES}")
+
+        # message(STATUS "Checking yaml-cpp target properties:")
+        # get_target_property(YAML_CPP_TYPE yaml-cpp::yaml-cpp TYPE)
+        # message(STATUS "  yaml-cpp::yaml-cpp TYPE: ${YAML_CPP_TYPE}")
+        # get_target_property(YAML_CPP_IMPORTED yaml-cpp::yaml-cpp IMPORTED)
+        # message(STATUS "  yaml-cpp::yaml-cpp IMPORTED: ${YAML_CPP_IMPORTED}")
+        # get_target_property(YAML_CPP_LIBRARY yaml-cpp::yaml-cpp IMPORTED_LOCATION)
+        # message(STATUS "  yaml-cpp::yaml-cpp IMPORTED_LOCATION: ${YAML_CPP_LIBRARY}")
+
+        message(STATUS "Checking osqp target properties:")
+        get_target_property(OSQP_TYPE osqp::osqpstatic TYPE)
+        message(STATUS "  osqp::osqpstatic TYPE: ${OSQP_TYPE}")
+        get_target_property(OSQP_IMPORTED osqp::osqpstatic IMPORTED)
+        message(STATUS "  osqp::osqpstatic IMPORTED: ${OSQP_IMPORTED}")
+        get_target_property(OSQP_LIBRARY osqp::osqpstatic IMPORTED_LOCATION)
+        message(STATUS "  osqp::osqpstatic IMPORTED_LOCATION: ${OSQP_LIBRARY}")
+
+        # 方法2：手动指定第三方库路径
+        # MPORTED_LOCATION 属性可能为空：在j3-arm环境下，第三方库可能不是通过 
+        # find_package 的IMPORTED目标方式找到的
+        message(STATUS "** Using manual OpenCV library path")
+        if(EXISTS ${CMAKE_SOURCE_DIR}/3rdparty/opencv-455/_install_j3_world_shared/lib)
+        file(GLOB OPENCV_LIBS "${CMAKE_SOURCE_DIR}/3rdparty/opencv-455/_install_j3_world_shared/lib/libopencv*.so*")
+        install(FILES ${OPENCV_LIBS}
+                DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        endif()
+
+        message(STATUS "** Using manual yaml-cpp library path")
+        if(EXISTS ${CMAKE_SOURCE_DIR}/3rdparty/yaml-080/_install_j3/lib)
+        file(GLOB YAML_CPP_LIBS "${CMAKE_SOURCE_DIR}/3rdparty/yaml-080/_install_j3/lib/libyaml-cpp*.so*")
+        install(FILES ${YAML_CPP_LIBS}
+                DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        endif()
+
+        message(STATUS "** Using manual osqp library path")
+        if(EXISTS ${CMAKE_SOURCE_DIR}/3rdparty/osqp-100/_install_j3/lib)
+        file(GLOB OSQP_LIBS "${CMAKE_SOURCE_DIR}/3rdparty/osqp-100/_install_j3/lib/libosqp*.so*")
+        install(FILES ${OSQP_LIBS}
+                DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        endif()
+
+endif()
+
+# 安装配置文件
+if(EXISTS ${CMAKE_SOURCE_DIR}/config)
+install(DIRECTORY config/
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/share
+    FILES_MATCHING PATTERN "*.yaml"
+    PATTERN "*.yml"
+    PATTERN "*.conf")
+endif()
