@@ -10,7 +10,8 @@
 #include <fstream>
 #include <random>
 #include <chrono>
-#include <regular_filter.h>
+// #include <regular_filter.h>
+#include <centerline_extract.h>
 
 #include <glob.h>
 #include "Eigen/Dense"
@@ -66,17 +67,6 @@ extern "C"
     std::vector<cv::Point2f> referencePoint;
     double resolution;
     int width, height;
-    struct savePose
-    {
-        int id;
-        double x;
-        double y;
-        double z;
-        double theta;
-        double kappas;
-        double v;
-        double a;
-    };
 
     typedef struct _lqrPose
     {
@@ -95,7 +85,11 @@ extern "C"
         float fPointX; //mm
         float fPointY; //mm
         float fAngle; //0.1^
+        float fkappa;
+        float fv;
+        float fa;
     }Road_Det_Track_PointType;
+
     #define ROAD_DET_TRACK_POINTNUM 50  //10m
     typedef struct _IpcSignal_Road_Det_TrackType
     {
@@ -110,7 +104,7 @@ extern "C"
         uint16_t u16rev;
     }IpcSignal_Road_Det_TrackType;
 
-#define LH_PATHPLANNING_ALG_VERSION ("LH-PAHTPLAN-V1.51") // pathplanning算法版本号
+    #define LH_PATHPLANNING_ALG_VERSION ("LH-PAHTPLAN-V1.51") // pathplanning算法版本号
 
     static cv::Mat g_sFreeSpaceGray;      // 输入freespace, 只申请一次空间，避免频繁申请释放空间产生内存碎片
     static string g_sglobalPathName = ""; // global 路径名称
@@ -139,11 +133,10 @@ extern "C"
     static double total_time = 20;
     static double delta_t = 0.1;
     static int CopyMatImg(T_FreeSpaceImg tFreeSpaceImg, cv::Mat &matDst);
-    static bool IsParamLegal(cv::Mat map, T_CarState tCarState, const char *tempFile);
     static void ColorTransformation(cv::Mat cvImgIn, cv::Mat &cvImgOut);
     static void geneatePathPoint(std::vector<PathOptimizationNS::State> result_path, std::vector<PathPoint> *points);
-    static void generateSpeed(std::vector<T_Obs> Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data, const char *tempFile);
-    static int LocalPathPlanning(const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState, const char *tempFile, bool needPath, double cur_speed);
+    static void generateSpeed(std::vector<T_Obs> Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data,vector<T_lqrPose> *resultPose);
+    static int LocalPathPlanning(const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState, bool needPath, double cur_speed,vector<T_lqrPose> *vectorLqrPose);
     // ##########################################################################################################
 
     // B样条基函数计算
@@ -811,7 +804,7 @@ int main()
     std::cout << "\nGenerating test sequence..." << std::endl;
     // auto sequence = generateTestSequence(num_frames, width, height);
     std::vector<cv::Mat> sequence;
-    for(int i=100;i<500;i++)
+    for(int i=135;i<500;i++)
     {
         width = 1920;  //图像宽
         height = 1080; //图像高
@@ -862,6 +855,7 @@ int main()
     std::cout << "----------------------------------------" << std::endl;
     
     auto total_start = std::chrono::high_resolution_clock::now();
+    std::vector<_lqrPose> lqrResultPose;
     
     for (int frame_id = 0; frame_id < num_frames; ++frame_id) {
         double timestamp = frame_id * 0.1;
@@ -959,11 +953,43 @@ int main()
             tCarState.dTheta = LocalPathRefer[over_start].heading;  
         }
 
-        char tempFile = './pathTemp.txt';
         std::vector<T_Obs> Obs;
         //############################################begin path plan#########################
+        vector<T_lqrPose> vectorLqrPose;
         //进行局部路径规划
-        LocalPathPlanning(sequence[frame_id], Obs, fused.points, tCarState,&tempFile,true,0);
+        LocalPathPlanning(sequence[frame_id], Obs, fused.points, tCarState,true,0, &vectorLqrPose);
+        std::cout<<"vectorLqrPose size: "<<vectorLqrPose.size()<<std::endl;
+        //clear the struct
+        IpcSignal_Road_Det_TrackType *pTrack = (IpcSignal_Road_Det_TrackType*)malloc(sizeof(IpcSignal_Road_Det_TrackType));
+        // IpcSignal_Road_Det_TrackType *pTrack = new IpcSignal_Road_Det_TrackType;
+        if(pTrack != NULL)
+        {
+           memset(pTrack,0,sizeof(IpcSignal_Road_Det_TrackType)); 
+        }
+        // //set timestamp
+        pTrack->u32TimeStamp = timestamp;
+        // //set carPose
+        pTrack->CarPoint.fPointX = tCarState.dX;
+        pTrack->CarPoint.fPointY = tCarState.dY;
+        pTrack->CarPoint.fAngle = tCarState.dTheta;
+        pTrack->CarPoint.fkappa = 0.0f;
+        pTrack->CarPoint.fv = 0.0f;
+        pTrack->CarPoint.fa = 0.0f;
+        //set path plan point
+        for(int i=0;i<ROAD_DET_TRACK_POINTNUM && i< vectorLqrPose.size();i++)
+        {
+            pTrack->sDetTrackPoint[i].fPointX = vectorLqrPose[i].x;
+            pTrack->sDetTrackPoint[i].fPointY = vectorLqrPose[i].y;
+            pTrack->sDetTrackPoint[i].fAngle  = vectorLqrPose[i].theta;
+            pTrack->sDetTrackPoint[i].fkappa  = vectorLqrPose[i].kappas;
+            pTrack->sDetTrackPoint[i].fv      = vectorLqrPose[i].v;
+            pTrack->sDetTrackPoint[i].fa      = vectorLqrPose[i].a;
+        }
+        pTrack->s8RoadDirection = 1;
+        pTrack->s8isRoadWide = 1;
+        pTrack->u16RoadWidth = fused.avg_width;
+
+
     }
     auto total_end = std::chrono::high_resolution_clock::now();
     double total_time = std::chrono::duration<double, std::milli>(total_end - total_start).count();
@@ -973,10 +999,11 @@ int main()
     std::cout << "Total time: " << total_time / 1000.0 << " s" << std::endl;
     std::cout << "Average per frame: " << total_time / num_frames << " ms" << std::endl;
     std::cout << "FPS: " << 1000.0 / (total_time / num_frames) << std::endl;    
+    waitKey(0);
     return 0;
 }
     // 前视摄像头安装角度水平，鱼眼矫正后有0.7m盲区
-    int LocalPathPlanning(const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState, const char *tempFile, bool needPath, double cur_speed)
+    int LocalPathPlanning(const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState,  bool needPath, double cur_speed,vector<T_lqrPose> *vectorLqrPose)
     {
         clock_t time1 = clock();
         // std::cout << "Lidar info object num: " << std::endl;
@@ -1489,8 +1516,15 @@ int main()
                 cv::waitKey(300);
                 std::vector<PathPoint> points;
                 geneatePathPoint(smoothed_trajectory, &points);
-                SpeedData speed_data;
-                generateSpeed(Obs, points, cur_speed, max_speed, &speed_data, tempFile);
+                SpeedData speed_data; 
+                std::vector<T_lqrPose> resultPose;
+                generateSpeed(Obs, points, cur_speed, max_speed, &speed_data,&resultPose);
+                for(int i=0;i<resultPose.size();i++)
+                {
+                    T_lqrPose lqrPose;
+                    lqrPose = resultPose[i];
+                    vectorLqrPose->push_back(lqrPose);
+                }
             }
 
             // restore parameters
@@ -1506,7 +1540,7 @@ int main()
         return iRet;
     }
 
-    void generateSpeed(std::vector<T_Obs> j3Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data, const char *tempFile)
+    void  generateSpeed(std::vector<T_Obs> j3Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data,vector<T_lqrPose> *resultPose)
     {
         LocalPathRefer.clear();
         PathOptimizationNS::State localRefer;
@@ -1556,7 +1590,12 @@ int main()
             obstacle_list_.push_back(Obstacles[i]);
         }
         std::vector<const Obstacle *> obstacles_;
-        obstacles_.emplace_back(&(obstacle_list_.back()));
+        if(obstacle_list_.size() > 0)
+        {
+           obstacles_.emplace_back(&(obstacle_list_.back())); 
+        }
+        
+        obstacles_.erase(std::remove(obstacles_.begin(),obstacles_.end(),nullptr),obstacles_.end());
 
         auto all_st_boundaries = st_obstacles_processor_.GetAllSTBoundaries();
         std::vector<const STBoundary *> boundaries;
@@ -1614,30 +1653,32 @@ int main()
         //   std::cout<<"interpolated size: "<<interpolated[i]<<std::endl;
         // }
 
-        string tempFilename2 = string(tempFile);
-        ofstream outFile2(tempFilename2.c_str(), ios::out | ios::binary);
-        savePose *savepose = new savePose;
+        // string tempFilename2 = string(tempFile);
+        // ofstream outFile2(tempFilename2.c_str(), ios::out | ios::binary);
         int id2 = 0;
+        vector<T_lqrPose> vectorLqrPoseTest;
         for (size_t i = 0; i != points.size(); ++i)
         {
+            T_lqrPose lqrpose;
             id2++;
-            savepose->id = id2;
-            savepose->x = points[i].x;
-            savepose->y = points[i].y;
-            savepose->z = 0;
-            savepose->theta = points[i].theta;
-            savepose->kappas = points[i].kappa;
-            savepose->v = interValitys[i];
-            savepose->a = interAcceles[i];
+            lqrpose.id = id2;
+            lqrpose.x = points[i].x;
+            lqrpose.y = points[i].y;
+            lqrpose.z = 0;
+            lqrpose.theta = points[i].theta;
+            lqrpose.kappas = points[i].kappa;
+            lqrpose.v = interValitys[i];
+            lqrpose.a = interAcceles[i];
             localRefer.x = points[i].x;
             localRefer.y = points[i].y;
             localRefer.heading = points[i].theta;
             localRefer.k = points[i].kappa;
             LocalPathRefer.push_back(localRefer);
-            outFile2.write((char *)savepose, sizeof(savePose));
+            // outFile2.write((char *)savepose, sizeof(savePose));
+            vectorLqrPoseTest.push_back(lqrpose);
+            resultPose->push_back(lqrpose);
         }
-        outFile2.close();
-        delete savepose;
+        // outFile2.close();
     }
 
     void geneatePathPoint(std::vector<PathOptimizationNS::State> resultPath, std::vector<PathPoint> *pointspath)
@@ -1683,7 +1724,7 @@ int main()
         }
         vector<double> curvitys = calculate_curvature_difference(result_path);
         cout << "Saving trajectory ..." << endl;
-        // write result path to tempFile
+
         std::vector<double> x_set, y_set, s_set, heading;
         for (size_t i = 0; i != result_path.size(); ++i)
         {

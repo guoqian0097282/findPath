@@ -33,6 +33,7 @@ include_directories(
 )
 
 add_library(${PROJECT_NAME}
+        src/centerline_extract
         src/tools/tools.cpp
         src/tools/spline.cpp
         src/path_optimizer.cpp
