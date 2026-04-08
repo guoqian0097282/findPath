@@ -1,6 +1,8 @@
 #ifndef DATATYPE_H
 #define DATATYPE_H
 
+#include<stdint.h>
+
 #define ARRAY_LEN (256) // 数组长度
 // input image type
 typedef struct _FreeSpaceImg
@@ -43,5 +45,35 @@ typedef enum _PathPlanAlgErrorType
     PathPlan_UPDATE = 1   // update finish
 } E_PathPlanAlgErrorType; // Error type
 
+typedef struct
+{
+    float fPointX; //mm
+    float fPointY; //mm
+    float fAngle; //0.1^
+    float fkappa;
+    float fv;
+    float fa;
+}Road_Det_Track_PointType;
+
+#define ROAD_DET_TRACK_POINTNUM 50  //10m
+typedef struct _IpcSignal_Road_Det_TrackType
+{
+    uint32_t u32TimeStamp;
+    Road_Det_Track_PointType CarPoint;
+    Road_Det_Track_PointType sDetTrackPoint[ROAD_DET_TRACK_POINTNUM];
+    int8_t s8RoadDirection;
+    int8_t s8isRoadWide;
+    uint16_t u16RoadWidth;
+    int8_t s8CruiseSceneMark;
+    uint8_t u8rev;
+    uint16_t u16rev;
+}IpcSignal_Road_Det_TrackType;
+
+#define OBS_NUM 50
+typedef struct _J3ObsData
+{
+    double dTimeStamp;
+    T_Obs  obs[OBS_NUM];
+}T_J3ObsData;
 // ##########################################################################################################
 #endif // endof define DATATYPE_H

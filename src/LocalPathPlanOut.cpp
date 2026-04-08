@@ -91,7 +91,7 @@ extern "C"
     static double max_speed; // m/s pathPoints[endIndex].v
     // ##########################################################################################################
     // speed set
-    static int imageId;
+    static int frame_id;
     static StGraphData st_graph_data_;
     static TrajectoryPoint init_point_;
     static DpStSpeedOptimizerConfig default_dp_config;
@@ -107,8 +107,7 @@ extern "C"
     static double longitudinal_jerk_upper_bound = 2.0;
     static double total_time = 20;
     static double delta_t = 0.1;
-    static std::deque<cv::Mat> globalSequence;
-    static int max_size = 400;
+    static int max_size = 20;
     static double centerBeginPixel = 80;
     // 获取统一管理器实例并一次性初始化所有组件
     static CenterlineManager* manager = CenterlineManager::getInstance();
@@ -116,7 +115,7 @@ extern "C"
     static void ColorTransformation(cv::Mat cvImgIn, cv::Mat &cvImgOut);
     static void geneatePathPoint(std::vector<PathOptimizationNS::State> result_path, std::vector<PathPoint> *points);
     static int generateSpeed(std::vector<T_Obs> Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data,vector<T_lqrPose> *resultPose);
-    static int LocalPathPlanning(T_FreeSpaceImg tFreeSpaceImg, const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState, bool needPath, vector<T_lqrPose> *vectorLqrPose);
+    static int LocalPathPlanning( const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState, bool needPath, vector<T_lqrPose> *vectorLqrPose);
     // ##########################################################################################################
 
     // B样条基函数计算
@@ -734,9 +733,10 @@ extern "C"
         isFirst = true;
         width = 500;
         height = 500;
-        resolution = 0.01;
+        resolution = 0.01; //图像分辨率
         updateFlag = false;
         max_speed = 1.2;
+        frame_id = 0;
         default_dp_config.unit_t = 1.0;
         default_dp_config.dense_dimension_s = 201;
         default_dp_config.dense_unit_s = 0.1;
@@ -776,12 +776,19 @@ extern "C"
         init_point_.v = 0.0;
         init_point_.a = 0.0;
         st_graph_data_ = StGraphData();
-        imageId = 0;
         // Ptr<ml::TrainData> mlDataX, mlDataY;
         // mlDataX = ml::TrainData::loadFromCSV("/app/slam/mapX.csv", 1);
         // mlDataY = ml::TrainData::loadFromCSV("/app/slam/mapY.csv", 1);
         // dataX = mlDataX->getTrainSamples();
         // dataY = mlDataY->getTrainSamples();
+        bool debug = false;
+        int max_history = 15;  //最大参考帧，用于时序平滑中心点的寻找
+    
+        if (!manager->initialize(resolution, debug, max_history, false)) 
+        {
+            std::cerr << "Failed to initialize CenterlineManager!" << std::endl;
+            return -1;
+        }
         printf("InitPathPlanning, ----------end:");
         return PathPlan_OK;
     }
@@ -789,53 +796,41 @@ extern "C"
 
 // ==================== 主函数 ====================
 
-int main() 
+int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_CarState tCarState,bool needPath, IpcSignal_Road_Det_TrackType *pTrack) 
 {
     //先进行变量的初始化
     InitPathPlanning();
     
+    if (g_sFreeSpaceGray.empty() && tFreeSpaceImg.uiHeight > 0)
+    {
+        g_sFreeSpaceGray.create(tFreeSpaceImg.uiHeight, tFreeSpaceImg.uiWidth, CV_8UC1);
+    }
+
+    CopyMatImg(tFreeSpaceImg, g_sFreeSpaceGray);
+    cv::Mat image = g_sFreeSpaceGray;
     // 参数配置
-    int width = 1920;  //图像宽
-    int height = 1080; //图像高
+    int width = image.cols;  //图像宽
+    int height = image.rows; //图像高
     int num_frames = 400;   //图像数量
     double resolution = 0.01;  //图像分辨率
-    bool debug = false;
-    int max_history = 15;  //最大参考帧，用于时序平滑中心点的寻找
-    if (!manager->initialize(resolution, debug, max_history, false)) {
-        std::cerr << "Failed to initialize CenterlineManager!" << std::endl;
-        return -1;
-    }
-    // 生成测试序列
-    for(int i=100;i<500;i++)
-    {
-        width = 1920;  //图像宽
-        height = 1080; //图像高
-        resolution = 0.01;  //图像分辨率
-        //选取某一帧作为测试图像
-        cv::Mat image = cv::imread("/home/gq/guoqian/findPath/test_image/" + to_string(i) + ".jpg");
-        //如果图像为空，直接返回规划失败
-        if(image.empty())
-        {
-            std::cout<<"image is empty"<<std::endl;
-            return PathPlan_FAILED;
-        }
-        //图像转换为灰度图，并进行二值化处理
-        if (image.channels() == 3)
-        {
-            cv::cvtColor(image, image, cv::COLOR_BGR2GRAY);
-        }
-        threshold(image, image, 120, 255, 0);
-        // 道路宽度最多是6米，所以对图像超出6米范围的区域进行不可通行区域的处理，方便寻找中心线
-        image.colRange(width/2+300,width).setTo(0);
-        image.colRange(0,width/2-300).setTo(0);
-        if(globalSequence.size() > max_size)
-        {
-            globalSequence.pop_front();
-        }
-        globalSequence.push_back(image);
-    }
-    std::cout << "  Generated " << globalSequence.size() << " frames" << std::endl;
+    frame_id++;
     
+    //如果图像为空，直接返回规划失败
+    if(image.empty())
+    {
+        std::cout<<"image is empty"<<std::endl;
+        return PathPlan_FAILED;
+    }
+    //图像转换为灰度图，并进行二值化处理
+    if (image.channels() == 3)
+    {
+        cv::cvtColor(image, image, cv::COLOR_BGR2GRAY);
+    }
+    threshold(image, image, 120, 255, 0);
+    // 道路宽度最多是6米，所以对图像超出6米范围的区域进行不可通行区域的处理，方便寻找中心线
+    image.colRange(width/2+300,width).setTo(0);
+    image.colRange(0,width/2-300).setTo(0);
+        
     // 车辆位置（图像底部中央）
     cv::Point2d vehicle_pos(width / 2.0 * resolution, (height - centerBeginPixel) * resolution);
     std::cout << "  Vehicle position: (" << vehicle_pos.x << ", " << vehicle_pos.y << ") m" << std::endl;
@@ -845,67 +840,55 @@ int main()
     manager->setVehiclePosition(vehicle_pos);
     auto total_start = std::chrono::high_resolution_clock::now();
     
-    for (int frame_id = 0; frame_id < globalSequence.size(); ++frame_id) {
+    double timestamp = tCarState.dTimeStamp;
+    
+    auto frame_start = std::chrono::high_resolution_clock::now();
+    
+    // 处理单帧
+    FrameData result = manager->processFrame(image, frame_id, frame_id * 0.033);
         
-        std::cout << "\nProcessing frame " << frame_id << "..." << std::endl;
-        double timestamp = frame_id * 0.1;
-        // 处理单帧
-        FrameData result = manager->processFrame(globalSequence[frame_id], frame_id, frame_id * 0.033);
-        
-        //定义车辆的全局坐标信息，即里程计坐标
-        T_CarState tCarState;
-        if(LocalPathRefer.size() < 1)
+    //############################################begin path plan#########################
+    vector<T_lqrPose> vectorLqrPose;
+    std::vector<T_Obs> obsData;
+    for(int i=0;i<50;i++)
+    {
+        if(J3ObsData->obs[i].obs_length != 0 && J3ObsData->obs[i].obs_x != 0)
         {
-            tCarState.dX = 0;
-            tCarState.dY = 0;
-            tCarState.dTheta = 0;            
-        }else
-        {
-            int over_start = std::max(0,(int)LocalPathRefer.size()-30);
-            tCarState.dX = LocalPathRefer[over_start].x;
-            tCarState.dY = LocalPathRefer[over_start].y;
-            tCarState.dTheta = LocalPathRefer[over_start].heading;  
+            obsData.push_back(J3ObsData->obs[i]);
         }
-
-        std::vector<T_Obs> Obs;
-        //############################################begin path plan#########################
-        vector<T_lqrPose> vectorLqrPose;
-        T_FreeSpaceImg tFreeSpaceImg;
-        //进行局部路径规划
-        LocalPathPlanning(tFreeSpaceImg,globalSequence[frame_id], Obs, result.points, tCarState,true, &vectorLqrPose);
-        std::cout<<"vectorLqrPose size: "<<vectorLqrPose.size()<<std::endl;
-        //clear the struct
-        IpcSignal_Road_Det_TrackType *pTrack = (IpcSignal_Road_Det_TrackType*)malloc(sizeof(IpcSignal_Road_Det_TrackType));
-        // IpcSignal_Road_Det_TrackType *pTrack = new IpcSignal_Road_Det_TrackType;
-        if(pTrack != NULL)
-        {
-           memset(pTrack,0,sizeof(IpcSignal_Road_Det_TrackType)); 
-        }
-        // //set timestamp
-        pTrack->u32TimeStamp = timestamp;
-        // //set carPose
-        pTrack->CarPoint.fPointX = tCarState.dX;
-        pTrack->CarPoint.fPointY = tCarState.dY;
-        pTrack->CarPoint.fAngle = tCarState.dTheta;
-        pTrack->CarPoint.fkappa = 0.0f;
-        pTrack->CarPoint.fv = 0.0f;
-        pTrack->CarPoint.fa = 0.0f;
-        //set path plan point
-        for(int i=0;i<ROAD_DET_TRACK_POINTNUM && i< vectorLqrPose.size();i++)
-        {
-            pTrack->sDetTrackPoint[i].fPointX = vectorLqrPose[i].x;
-            pTrack->sDetTrackPoint[i].fPointY = vectorLqrPose[i].y;
-            pTrack->sDetTrackPoint[i].fAngle  = vectorLqrPose[i].theta;
-            pTrack->sDetTrackPoint[i].fkappa  = vectorLqrPose[i].kappas;
-            pTrack->sDetTrackPoint[i].fv      = vectorLqrPose[i].v;
-            pTrack->sDetTrackPoint[i].fa      = vectorLqrPose[i].a;
-        }
-        pTrack->s8RoadDirection = 1;
-        pTrack->s8isRoadWide = 1;
-        pTrack->u16RoadWidth = result.avg_width;
-
-
     }
+    
+    //进行局部路径规划
+    int ret = LocalPathPlanning(image, obsData, result.points, tCarState,true, &vectorLqrPose);
+    std::cout<<"vectorLqrPose size: "<<vectorLqrPose.size()<<std::endl;
+    //clear the struct
+    if(pTrack != NULL)
+    {
+        memset(pTrack,0,sizeof(IpcSignal_Road_Det_TrackType)); 
+    }
+    // //set timestamp
+    pTrack->u32TimeStamp = timestamp;
+    // //set carPose
+    pTrack->CarPoint.fPointX = tCarState.dX;
+    pTrack->CarPoint.fPointY = tCarState.dY;
+    pTrack->CarPoint.fAngle = tCarState.dTheta;
+    pTrack->CarPoint.fkappa = 0.0f;
+    pTrack->CarPoint.fv = 0.0f;
+    pTrack->CarPoint.fa = 0.0f;
+    //set path plan point
+    for(int i=0;i<ROAD_DET_TRACK_POINTNUM && i< vectorLqrPose.size();i++)
+    {
+        pTrack->sDetTrackPoint[i].fPointX = vectorLqrPose[i].x;
+        pTrack->sDetTrackPoint[i].fPointY = vectorLqrPose[i].y;
+        pTrack->sDetTrackPoint[i].fAngle  = vectorLqrPose[i].theta;
+        pTrack->sDetTrackPoint[i].fkappa  = vectorLqrPose[i].kappas;
+        pTrack->sDetTrackPoint[i].fv      = vectorLqrPose[i].v;
+        pTrack->sDetTrackPoint[i].fa      = vectorLqrPose[i].a;
+    }
+    pTrack->s8RoadDirection = 1;
+    pTrack->s8isRoadWide = 1;
+    pTrack->u16RoadWidth = result.avg_width;
+    
     auto total_end = std::chrono::high_resolution_clock::now();
     double total_time = std::chrono::duration<double, std::milli>(total_end - total_start).count();
     
@@ -915,21 +898,13 @@ int main()
     std::cout << "Average per frame: " << total_time / num_frames << " ms" << std::endl;
     std::cout << "FPS: " << 1000.0 / (total_time / num_frames) << std::endl;    
     waitKey(0);
-    return 0;
+    return ret;
 }
     // 前视摄像头安装角度水平，鱼眼矫正后有0.7m盲区
-    int LocalPathPlanning(T_FreeSpaceImg tFreeSpaceImg, const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState,  bool needPath,vector<T_lqrPose> *vectorLqrPose)
+    int LocalPathPlanning(const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState,  bool needPath,vector<T_lqrPose> *vectorLqrPose)
     {
         clock_t time1 = clock();
-        // std::cout << "Lidar info object num: " << std::endl;
-        // if (g_sFreeSpaceGray.empty() && tFreeSpaceImg.uiHeight > 0)
-        // {
-        //     g_sFreeSpaceGray.create(tFreeSpaceImg.uiHeight, tFreeSpaceImg.uiWidth, CV_8UC1);
-        // }
-
-        // CopyMatImg(tFreeSpaceImg, g_sFreeSpaceGray);
         resolution = 0.01;
-        imageId++;
         bool shortPath = false; //用于判断剩余路径是不是过短，及时进行局部路径的重规划
         // draw map
         Mat new_map;
@@ -977,8 +952,6 @@ int main()
         image.copyTo(new_map);
         if ((isFirst || needPath || travelDistance > 64 || shortPath)) //再次进行局部规划
         {
-            std::cout << "imageId: " << imageId << std::endl;
-            // imwrite("/app/slam/" + to_string(imageId) + "J3map.jpg", new_map); // 保存图
             // 4.补全车前的盲区
             cv::Rect roi(560,800,800,280);
             if(roi.x+roi.width <= new_map.cols && roi.y+roi.height <= new_map.rows)

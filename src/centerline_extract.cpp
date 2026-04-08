@@ -1,13 +1,55 @@
 #include "centerline_extract.h"
 
+// ==================== 静态成员初始化 ====================
+
+// SmoothingFilter
+std::unique_ptr<SmoothingFilter> SmoothingFilter::instance_ = nullptr;
+std::mutex SmoothingFilter::mutex_;
+
+// CenterlineExtractor
+std::unique_ptr<CenterlineExtractor> CenterlineExtractor::instance_ = nullptr;
+std::mutex CenterlineExtractor::mutex_;
+
+// TemporalProcessor
+std::unique_ptr<TemporalProcessor> TemporalProcessor::instance_ = nullptr;
+std::mutex TemporalProcessor::mutex_;
+
+// StartPointAligner
+std::unique_ptr<StartPointAligner> StartPointAligner::instance_ = nullptr;
+std::mutex StartPointAligner::mutex_;
+
+// CenterCorrector
+std::unique_ptr<CenterCorrector> CenterCorrector::instance_ = nullptr;
+std::mutex CenterCorrector::mutex_;
+
+// Visualizer
+std::unique_ptr<Visualizer> Visualizer::instance_ = nullptr;
+std::mutex Visualizer::mutex_;
+
+// ConfigManager
+std::unique_ptr<ConfigManager> ConfigManager::instance_ = nullptr;
+std::mutex ConfigManager::mutex_;
+
+// CenterlineManager
+std::unique_ptr<CenterlineManager> CenterlineManager::instance_ = nullptr;
+std::mutex CenterlineManager::mutex_;
+
 // ==================== CenterlinePoint 实现 ====================
 
 CenterlinePoint::CenterlinePoint() 
     : curvature(0), heading(0), confidence(1.0), 
       road_width(0), timestamp(0) {}
 
-// ==================== 平滑滤波器 SmoothingFilter 实现 ====================
-// 移动平均平滑
+// ==================== SmoothingFilter 实现 ====================
+
+SmoothingFilter* SmoothingFilter::getInstance() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!instance_) {
+        instance_.reset(new SmoothingFilter());
+    }
+    return instance_.get();
+}
+
 std::vector<CenterlinePoint> SmoothingFilter::movingAverage(const std::vector<CenterlinePoint>& points, int window) {
     if (points.size() < (size_t)window) return points;
     
@@ -39,7 +81,6 @@ std::vector<CenterlinePoint> SmoothingFilter::movingAverage(const std::vector<Ce
     return smoothed;
 }
 
-// 高斯平滑
 std::vector<CenterlinePoint> SmoothingFilter::gaussianSmooth(const std::vector<CenterlinePoint>& points, double sigma) {
     if (points.size() < 5) return points;
     
@@ -84,10 +125,32 @@ std::vector<CenterlinePoint> SmoothingFilter::gaussianSmooth(const std::vector<C
     return smoothed;
 }
 
-// ==================== 中心线提取器 CenterlineExtractor 实现 ====================
+// ==================== CenterlineExtractor 实现 ====================
 
-CenterlineExtractor::CenterlineExtractor(double resolution, bool debug)
-    : resolution_(resolution), debug_(debug) {}
+CenterlineExtractor::CenterlineExtractor() 
+    : resolution_(0.1), debug_(false), initialized_(false) {}
+
+CenterlineExtractor* CenterlineExtractor::getInstance() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!instance_) {
+        instance_.reset(new CenterlineExtractor());
+    }
+    return instance_.get();
+}
+
+bool CenterlineExtractor::initialize(double resolution, bool debug) {
+    if (initialized_) {
+        if (debug) std::cout << "CenterlineExtractor already initialized" << std::endl;
+        return true;
+    }
+    
+    resolution_ = resolution;
+    debug_ = debug;
+    initialized_ = true;
+    
+    if (debug_) std::cout << "CenterlineExtractor initialized with resolution: " << resolution_ << std::endl;
+    return true;
+}
 
 void CenterlineExtractor::setVehiclePosition(const cv::Point2d& pos) {
     vehicle_pos_ = pos;
@@ -95,6 +158,11 @@ void CenterlineExtractor::setVehiclePosition(const cv::Point2d& pos) {
 
 std::vector<CenterlinePoint> CenterlineExtractor::extract(const cv::Mat& occupancy_grid) {
     std::vector<CenterlinePoint> centerline;
+    
+    if (!initialized_) {
+        if (debug_) std::cout << "CenterlineExtractor not initialized!" << std::endl;
+        return centerline;
+    }
     
     if (occupancy_grid.empty()) return centerline;
     
@@ -108,18 +176,18 @@ std::vector<CenterlinePoint> CenterlineExtractor::extract(const cv::Mat& occupan
     vehicle_px = std::max(0, std::min(width - 1, vehicle_px));
     vehicle_py = std::max(0, std::min(height - 1, vehicle_py));
     
-    // 扫描参数 - 从车辆位置向上扫描到图像顶部
-    int scan_step = 10;
+    // 扫描参数
+    int scan_step = ConfigManager::getInstance()->getScanStep();
     int scan_start = 100;
-    // for(int i = height/2; i >0;i=i-20)
-    // {
-    //     uchar pixel = occupancy_grid.at<uchar>(i, width/2);
-    //     if(pixel == 0)
-    //     {
-    //         scan_start = i;
-    //         break;
-    //     }
-    // }
+    for(int i = height/4; i >100;i=i-20)
+    {
+        uchar pixel = occupancy_grid.at<uchar>(i, width/2);
+        if(pixel == 0)
+        {
+            scan_start = i;
+            break;
+        }
+    }
     int scan_end = vehicle_py;
     
     for (int y = scan_end; y >= scan_start; y -= scan_step) {
@@ -174,9 +242,10 @@ std::vector<CenterlinePoint> CenterlineExtractor::extract(const cv::Mat& occupan
     }
     
     // 平滑处理
-    if (centerline.size() > 50) {
-        centerline = SmoothingFilter::movingAverage(centerline, 50);
-        centerline = SmoothingFilter::gaussianSmooth(centerline, 1.0);
+    SmoothingFilter* smoother = SmoothingFilter::getInstance();
+    if (centerline.size() > (size_t)ConfigManager::getInstance()->getMovingWindow()) {
+        centerline = smoother->movingAverage(centerline, ConfigManager::getInstance()->getMovingWindow());
+        centerline = smoother->gaussianSmooth(centerline, ConfigManager::getInstance()->getGaussianSigma());
     }
     
     // 计算曲率和航向
@@ -200,9 +269,26 @@ std::vector<CenterlinePoint> CenterlineExtractor::extract(const cv::Mat& occupan
     return centerline;
 }
 
-// ==================== 时序处理器 TemporalProcessor 实现 ====================
+// ==================== TemporalProcessor 实现 ====================
 
-TemporalProcessor::TemporalProcessor(int max_history) : max_history_(max_history) {}
+TemporalProcessor::TemporalProcessor() 
+    : max_history_(15), initialized_(false) {}
+
+TemporalProcessor* TemporalProcessor::getInstance() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!instance_) {
+        instance_.reset(new TemporalProcessor());
+    }
+    return instance_.get();
+}
+
+bool TemporalProcessor::initialize(int max_history) {
+    if (initialized_) return true;
+    
+    max_history_ = max_history;
+    initialized_ = true;
+    return true;
+}
 
 double TemporalProcessor::calculatePathLength(const std::vector<CenterlinePoint>& points) {
     if (points.size() < 2) return 0;
@@ -215,6 +301,8 @@ double TemporalProcessor::calculatePathLength(const std::vector<CenterlinePoint>
 
 FrameData TemporalProcessor::process(const FrameData& current) {
     FrameData fused = current;
+    
+    if (!initialized_) return fused;
     
     if (history_.empty()) {
         history_.push_back(current);
@@ -261,7 +349,7 @@ FrameData TemporalProcessor::process(const FrameData& current) {
     
     // 时序平滑
     if (fused_points.size() > 5) {
-        fused_points = SmoothingFilter::gaussianSmooth(fused_points, 0.8);
+        fused_points = SmoothingFilter::getInstance()->gaussianSmooth(fused_points, 0.8);
     }
     
     fused.points = fused_points;
@@ -281,7 +369,21 @@ void TemporalProcessor::clear() {
 
 // ==================== StartPointAligner 起点对齐器实现 ====================
 
-StartPointAligner::StartPointAligner() {}
+StartPointAligner::StartPointAligner() : initialized_(false) {}
+
+StartPointAligner* StartPointAligner::getInstance() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!instance_) {
+        instance_.reset(new StartPointAligner());
+    }
+    return instance_.get();
+}
+
+bool StartPointAligner::initialize() {
+    if (initialized_) return true;
+    initialized_ = true;
+    return true;
+}
 
 void StartPointAligner::setVehiclePosition(const cv::Point2d& pos) {
     vehicle_pos_ = pos;
@@ -323,7 +425,21 @@ std::vector<CenterlinePoint> StartPointAligner::ensureExact(const std::vector<Ce
 
 // ==================== 中心校正器  ====================
 
-CenterCorrector::CenterCorrector() {}
+CenterCorrector::CenterCorrector() : initialized_(false) {}
+
+CenterCorrector* CenterCorrector::getInstance() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!instance_) {
+        instance_.reset(new CenterCorrector());
+    }
+    return instance_.get();
+}
+
+bool CenterCorrector::initialize() {
+    if (initialized_) return true;
+    initialized_ = true;
+    return true;
+}
 
 void CenterCorrector::setVehiclePosition(const cv::Point2d& pos) {
     vehicle_pos_ = pos;
@@ -368,8 +484,24 @@ void CenterCorrector::reset() {
 
 // ==================== Visualizer 可视化器实现 ====================
 
-Visualizer::Visualizer(double resolution, bool save_images)
-    : resolution_(resolution), save_images_(save_images) {}
+Visualizer::Visualizer() : resolution_(0.1), save_images_(false), initialized_(false) {}
+
+Visualizer* Visualizer::getInstance() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!instance_) {
+        instance_.reset(new Visualizer());
+    }
+    return instance_.get();
+}
+
+bool Visualizer::initialize(double resolution, bool save_images) {
+    if (initialized_) return true;
+    
+    resolution_ = resolution;
+    save_images_ = save_images;
+    initialized_ = true;
+    return true;
+}
 
 double Visualizer::calculateLength(const std::vector<CenterlinePoint>& points) {
     if (points.size() < 2) return 0;
@@ -383,7 +515,7 @@ double Visualizer::calculateLength(const std::vector<CenterlinePoint>& points) {
 void Visualizer::show(const cv::Mat& image, const std::vector<CenterlinePoint>& points,
                       const cv::Point2d& vehicle_pos, int frame_id, double offset) {
     
-    if (image.empty()) return;
+    if (!initialized_ || image.empty()) return;
     
     cv::Mat display;
     cv::cvtColor(image, display, cv::COLOR_GRAY2BGR);
@@ -450,6 +582,126 @@ void Visualizer::show(const cv::Mat& image, const std::vector<CenterlinePoint>& 
     }
     
     cv::waitKey(30);
+}
+
+// ==================== ConfigManager 实现 ====================
+
+ConfigManager* ConfigManager::getInstance() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!instance_) {
+        instance_.reset(new ConfigManager());
+    }
+    return instance_.get();
+}
+
+bool ConfigManager::initialize(double resolution, bool debug, int max_history, bool save_images) {
+    if (initialized_) return true;
+    
+    config_.resolution = resolution;
+    config_.debug = debug;
+    config_.max_history = max_history;
+    config_.save_images = save_images;
+    initialized_ = true;
+    
+    if (debug) {
+        std::cout << "ConfigManager initialized with:" << std::endl;
+        std::cout << "  Resolution: " << resolution << std::endl;
+        std::cout << "  Debug: " << debug << std::endl;
+        std::cout << "  Max History: " << max_history << std::endl;
+        std::cout << "  Save Images: " << save_images << std::endl;
+    }
+    
+    return true;
+}
+
+// ==================== CenterlineManager 实现 ====================
+
+CenterlineManager::CenterlineManager() : initialized_(false), vehicle_pos_(0, 0) {}
+
+CenterlineManager::~CenterlineManager() {
+    reset();
+}
+
+CenterlineManager* CenterlineManager::getInstance() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!instance_) {
+        instance_.reset(new CenterlineManager());
+    }
+    return instance_.get();
+}
+
+bool CenterlineManager::initialize(double resolution, bool debug, int max_history, bool save_images) {
+    if (initialized_) {
+        if (debug) std::cout << "CenterlineManager already initialized" << std::endl;
+        return true;
+    }
+    
+    // 初始化配置管理器
+    ConfigManager::getInstance()->initialize(resolution, debug, max_history, save_images);
+    
+    // 初始化所有组件
+    bool success = true;
+    success &= CenterlineExtractor::getInstance()->initialize(resolution, debug);
+    success &= TemporalProcessor::getInstance()->initialize(max_history);
+    success &= StartPointAligner::getInstance()->initialize();
+    success &= CenterCorrector::getInstance()->initialize();
+    success &= Visualizer::getInstance()->initialize(resolution, save_images);
+    
+    initialized_ = success;
+    
+    if (debug) {
+        std::cout << "CenterlineManager initialization " 
+                  << (success ? "successful" : "failed") << std::endl;
+    }
+    
+    return success;
+}
+
+void CenterlineManager::setVehiclePosition(const cv::Point2d& pos) {
+    vehicle_pos_ = pos;
+    
+    // 同时设置所有需要车辆位置的组件
+    CenterlineExtractor::getInstance()->setVehiclePosition(pos);
+    StartPointAligner::getInstance()->setVehiclePosition(pos);
+    CenterCorrector::getInstance()->setVehiclePosition(pos);
+}
+
+FrameData CenterlineManager::processFrame(const cv::Mat& occupancy_grid, int frame_id, double timestamp) {
+    FrameData result;
+    result.frame_id = frame_id;
+    result.timestamp = timestamp;
+    result.image = occupancy_grid;
+    
+    if (!initialized_) {
+        std::cerr << "CenterlineManager not initialized!" << std::endl;
+        return result;
+    }
+    
+    // 1. 提取中心线
+    auto centerline = CenterlineExtractor::getInstance()->extract(occupancy_grid);
+    
+    // 2. 起点对齐
+    centerline = StartPointAligner::getInstance()->ensureExact(centerline);
+    
+    // 3. 中心校正
+    centerline = CenterCorrector::getInstance()->correct(centerline);
+    
+    // 4. 创建帧数据
+    result.points = centerline;
+    result.lateral_offset = CenterCorrector::getInstance()->calculateOffset(centerline);
+    
+    // 5. 时序处理
+    result = TemporalProcessor::getInstance()->process(result);
+    
+    // 6. 可视化
+    Visualizer::getInstance()->show(occupancy_grid, result.points, vehicle_pos_, frame_id, result.lateral_offset);
+    
+    return result;
+}
+
+void CenterlineManager::reset() {
+    TemporalProcessor::getInstance()->clear();
+    CenterCorrector::getInstance()->reset();
 }
 
 // ==================== 测试数据生成 ====================
