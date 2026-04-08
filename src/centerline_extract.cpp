@@ -111,6 +111,15 @@ std::vector<CenterlinePoint> CenterlineExtractor::extract(const cv::Mat& occupan
     // 扫描参数 - 从车辆位置向上扫描到图像顶部
     int scan_step = 10;
     int scan_start = 100;
+    // for(int i = height/2; i >0;i=i-20)
+    // {
+    //     uchar pixel = occupancy_grid.at<uchar>(i, width/2);
+    //     if(pixel == 0)
+    //     {
+    //         scan_start = i;
+    //         break;
+    //     }
+    // }
     int scan_end = vehicle_py;
     
     for (int y = scan_end; y >= scan_start; y -= scan_step) {

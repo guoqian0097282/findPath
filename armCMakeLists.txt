@@ -169,6 +169,13 @@ elseif(BUILD_PLATFORM STREQUAL "j3-arm")
         DESTINATION ${CMAKE_INSTALL_PREFIX}/include/eigen3)
         install(DIRECTORY 3rdparty/yaml-080/_install_j3/include/
         DESTINATION ${CMAKE_INSTALL_PREFIX}/include/yaml-cpp)
+
+        install(DIRECTORY 3rdparty/AFA_LIB/J3/gflags-2.2.2/include
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/gflags)        
+        install(DIRECTORY 3rdparty/AFA_LIB/J3/osqp-0.5.0/include
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/osqp)     
+        install(DIRECTORY 3rdparty/AFA_LIB/J3/osqp-eigen-0.4.1/include
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/include/OsqpEigen)     
 endif()
 
 # 安装链接的第三方库文件
@@ -252,6 +259,26 @@ elseif(BUILD_PLATFORM STREQUAL "j3-arm")
                 DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
         endif()
 
+        message(STATUS "** Using manual gflags library path")
+        if(EXISTS ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/gflags-2.2.2/lib)
+        file(GLOB GFLAGS_LIBS "${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/gflags-2.2.2/lib/libgflags*.so*")
+        install(FILES ${GFLAGS_LIBS}
+                DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        endif()
+
+        message(STATUS "** Using manual osqp library path")
+        if(EXISTS ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/osqp-0.5.0/lib)
+        file(GLOB OSQP_LIBS "${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/osqp-0.5.0/lib/libgosqp*.so*")
+        install(FILES ${OSQP_LIBS}
+                DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        endif()
+
+        message(STATUS "** Using manual osqp-eigen library path")
+        if(EXISTS ${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/osqp-eigen-0.4.1/lib)
+        file(GLOB OSQPEIGEN_LIBS "${CMAKE_SOURCE_DIR}/3rdparty/AFA_LIB/J3/osqp-eigen-0.4.1/lib/libgOsqpEigen*.so*")
+        install(FILES ${OSQPEIGEN_LIBS}
+                DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+        endif()
 endif()
 
 # 安装配置文件

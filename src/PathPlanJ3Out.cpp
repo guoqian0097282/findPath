@@ -1,46 +1,32 @@
 // ##########################################################################################################
-// create by guoqian on 25-05-15
-#include "DataType.hpp"
-#include "tools/spline.h"
+// create by guoqian on 23-10-20
 #include <iostream>
 #include <vector>
-#include <glob.h>
 #include "Eigen/Dense"
 #include "opencv2/core/core.hpp"
 #include "opencv2/core/eigen.hpp"
 #include "opencv2/opencv.hpp"
 #include <iostream>
+#include <vector>
 #include <tuple>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <grid_map_core/grid_map_core.hpp>
 #include <grid_map_cv/grid_map_cv.hpp>
 #include "Eigen/Dense"
-#include "path_optimizer_2/path_optimizer.hpp"
-#include "tools/eigen2cv.hpp"
-#include "data_struct/data_struct.hpp"
-#include "tools/tools.hpp"
-#include "data_struct/reference_path.hpp"
-#include "config/planning_flags.hpp"
-#include "tools/Map.hpp"
+#include "eigen2cv.hpp"
+#include "reference_line_processor.h"
+#include "path/data_structure.h"
+#include "path/path_problem_manager.h"
+#include "solver/solver.h"
+#include "path/gflags.h"
+#include "path/tool.h"
+#include "DataType.hpp"
 #include "bezier.hpp"
+#include "tinyspline_ros/bspline.h"
 #include <tinyspline_ros/tinysplinecpp.h>
-
+#include "tools/tools.hpp"
 // ##########################################################################################################
-#include "gridded_path_time_graph.h"
-#include "pnc_point.h"
-#include "perception_obstacle.h"
-#include "planning_gflags.h"
-#include <string>
-#include <utility>
-#include "speed_profile_generator.h"
-#include "st_graph_data.h"
-#include "piecewise_jerk_speed_problem.h"
-#include "piecewise_jerk_problem.h"
-#include "linear_interpolation.h"
-#include "path_data.h"
-#include "DP_speed_planner.h"
-#include "st_obstacles_processor.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -52,18 +38,24 @@ extern "C"
     using namespace cv;
     using namespace std;
     using namespace Eigen;
+    using namespace PathPlanning;
 
-    PathOptimizationNS::State start_state, end_state, car_state, init_state, car_state_local, init_stateObs;
-    std::vector<PathOptimizationNS::State> reference_path_plot;
-    std::vector<PathOptimizationNS::State> LocalPath;
-    std::vector<PathOptimizationNS::State> LocalPathRefer;
-    static int localIndex = 0;
-    static bool iscurvityTurn = false;
-    PathOptimizationNS::ReferencePath reference_path_opt;
+    PathPlanning::PathPoint start_state, end_state, car_state, init_state, car_state_local;
+    std::vector<PathPlanning::PathPoint> reference_path_plot;
+    std::vector<PathPlanning::PathPoint> LocalPath;
     bool start_state_rcv = false, end_state_rcv = false, reference_rcv = false;
     std::vector<cv::Point2f> referencePoint;
+    cv::Mat dataX, dataY;
     double resolution;
     int width, height;
+    struct savePoseOri
+    {
+        int id;
+        double x;
+        double y;
+        double z;
+        double theta;
+    };
     struct savePose
     {
         int id;
@@ -88,7 +80,7 @@ extern "C"
         double a;
     } T_lqrPose;
 
-#define LH_PATHPLANNING_ALG_VERSION ("LH-PAHTPLAN-V1.51") // pathplanning算法版本号
+#define LH_PATHPLANNING_ALG_VERSION ("LH-PAHTPLAN-V1.22") // pathplanning算法版本号
 
     static cv::Mat g_sFreeSpaceGray;      // 输入freespace, 只申请一次空间，避免频繁申请释放空间产生内存碎片
     static string g_sglobalPathName = ""; // global 路径名称
@@ -96,146 +88,44 @@ extern "C"
     static E_PathPlanAlgErrorType e_PathPlanAlgErrorType;
     static bool isFirst;
     static bool updateFlag;
-    static double max_speed; // m/s pathPoints[endIndex].v
-    static double normal_speed;
     // ##########################################################################################################
-    // speed set
-    static int imageId;
-    static StGraphData st_graph_data_;
-    static TrajectoryPoint init_point_;
-    static DpStSpeedOptimizerConfig default_dp_config;
-    static SpeedLimit speed_limit;
-    static double max_acceleration = 2.0;
-    static double max_deceleration = -4.0;
-    static double ref_v_weight = 10.0;
-    static double acc_weight = 1.0;
-    static double jerk_weight = 3.0;
-    static double kappa_penalty_weight = 4.0;
-    static double ref_s_weight = 10.0;
-    static double longitudinal_jerk_lower_bound = -4;
-    static double longitudinal_jerk_upper_bound = 2.0;
-    static double total_time = 20;
-    static double delta_t = 0.1;
+
     static int CopyMatImg(T_FreeSpaceImg tFreeSpaceImg, cv::Mat &matDst);
-    static bool IsParamLegal(cv::Mat map, T_CarState tCarState, const char *tempFile);
+    static bool IsParamLegal(T_FreeSpaceImg tFreeSpaceImg, T_CarState tCarState, const char *tempFile);
     static void ColorTransformation(cv::Mat cvImgIn, cv::Mat &cvImgOut);
-    static void geneatePathPoint(std::vector<PathOptimizationNS::State> result_path, std::vector<PathPoint> *points);
-    static void generateSpeed(std::vector<J3Obs> j3Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data, const char *tempFile);
+    static void writeTempFile(std::vector<PathPoint> result_path, const char *tempFile);
+    static int writeMemory(T_lqrPose *lqrPose);
     // ##########################################################################################################
-
-    // B样条基函数计算
-    double bsplineBasis(int i, int k, const std::vector<double> &knots, double t)
+    // 线性插值函数
+    std::vector<double> linearInterpolation(const std::vector<double> &input, int newSize)
     {
-        if (k == 1)
+        if (input.empty())
+            return {};
+        if (newSize <= input.size())
+            return input; // 如果新大小不大于原大小，直接返回
+
+        std::vector<double> output(newSize);
+        double scale = static_cast<double>(input.size() - 1) / (newSize - 1);
+
+        for (int i = 0; i < newSize; ++i)
         {
-            return (t >= knots[i] && t < knots[i + 1]) ? 1.0 : 0.0;
-        }
+            double pos = i * scale;
+            int left = static_cast<int>(pos);
+            double alpha = pos - left;
 
-        double denom1 = knots[i + k - 1] - knots[i];
-        double denom2 = knots[i + k] - knots[i + 1];
-
-        double term1 = (denom1 != 0.0) ? (t - knots[i]) / denom1 * bsplineBasis(i, k - 1, knots, t) : 0.0;
-        double term2 = (denom2 != 0.0) ? (knots[i + k] - t) / denom2 * bsplineBasis(i + 1, k - 1, knots, t) : 0.0;
-
-        return term1 + term2;
-    }
-
-    // 构建B样条设计矩阵
-    Eigen::MatrixXd buildDesignMatrix(const std::vector<double> &params,
-                                      const std::vector<double> &knots,
-                                      int degree)
-    {
-        int n = params.size();
-        int m = knots.size() - degree - 1;
-        Eigen::MatrixXd A(n, m);
-
-        for (int i = 0; i < n; ++i)
-        {
-            for (int j = 0; j < m; ++j)
+            if (left + 1 < input.size())
             {
-                A(i, j) = bsplineBasis(j, degree + 1, knots, params[i]);
+                // 线性插值公式: output = input[left] * (1 - alpha) + input[left+1] * alpha
+                output[i] = input[left] * (1.0 - alpha) + input[left + 1] * alpha;
+            }
+            else
+            {
+                // 处理最后一个元素的情况
+                output[i] = input.back();
             }
         }
 
-        return A;
-    }
-
-    // 构建平滑惩罚矩阵
-    Eigen::MatrixXd buildSmoothnessMatrix(const std::vector<double> &knots,
-                                          int degree, int numControlPoints)
-    {
-        int m = numControlPoints;
-        Eigen::MatrixXd D(m - 2, m);
-        D.setZero();
-
-        for (int i = 0; i < m - 2; ++i)
-        {
-            double h1 = knots[i + degree + 1] - knots[i + 1];
-            double h2 = knots[i + degree + 2] - knots[i + 2];
-
-            if (h1 != 0.0)
-                D(i, i) = 1.0 / h1;
-            if (h1 != 0.0 && h2 != 0.0)
-                D(i, i + 1) = -(1.0 / h1 + 1.0 / h2);
-            if (h2 != 0.0)
-                D(i, i + 2) = 1.0 / h2;
-        }
-
-        return D;
-    }
-
-    // 基于B样条的曲率平滑
-    std::vector<double> bsplineCurvatureSmoothing(
-        const std::vector<double> &curvature, // 输入曲率值
-        const std::vector<double> &params,    // 参数化值 (通常为[0,1]均匀分布)
-        int degree,                           // B样条次数 (通常为3)
-        double lambda,                        // 平滑参数
-        int numControlPoints                  // 控制点数量 (通常少于数据点)
-    )
-    {
-        // 1. 创建节点向量
-        std::vector<double> knots(numControlPoints + degree + 1);
-
-        // 均匀节点 (开放均匀B样条)
-        for (int i = 0; i <= degree; ++i)
-            knots[i] = params.front();
-        for (int i = 1; i < numControlPoints - degree; ++i)
-        {
-            double t = static_cast<double>(i) / (numControlPoints - degree);
-            knots[degree + i] = params.front() + t * (params.back() - params.front());
-        }
-        for (int i = numControlPoints; i < knots.size(); ++i)
-            knots[i] = params.back();
-
-        // 2. 构建设计矩阵A
-        Eigen::MatrixXd A = buildDesignMatrix(params, knots, degree);
-
-        // 3. 构建平滑矩阵D
-        Eigen::MatrixXd D = buildSmoothnessMatrix(knots, degree, numControlPoints);
-
-        // 4. 构建右侧向量b
-        Eigen::VectorXd b(curvature.size());
-        for (int i = 0; i < curvature.size(); ++i)
-            b(i) = curvature[i];
-
-        // 5. 解线性系统 (AᵀA + λDᵀD)c = Aᵀb
-        Eigen::MatrixXd lhs = A.transpose() * A + lambda * D.transpose() * D;
-        Eigen::VectorXd rhs = A.transpose() * b;
-        Eigen::VectorXd controlPoints = lhs.ldlt().solve(rhs);
-
-        // 6. 计算平滑后的曲率值
-        std::vector<double> smoothed(curvature.size());
-        for (int i = 0; i < params.size(); ++i)
-        {
-            double val = 0.0;
-            for (int j = 0; j < numControlPoints; ++j)
-            {
-                val += controlPoints(j) * bsplineBasis(j, degree + 1, knots, params[i]);
-            }
-            smoothed[i] = val;
-        }
-
-        return smoothed;
+        return output;
     }
 
     // 三点画圆法
@@ -299,12 +189,8 @@ extern "C"
         return curvature_list;
     }
     // 差分法
-    vector<double> calculate_curvature_difference(const vector<Point2f> &result_path, int interval = 9)
+    vector<double> calculate_curvature_difference(const vector<Point2f> &result_path, int interval = 5)
     {
-        if (result_path.size() < 50)
-        {
-            interval = 5;
-        }
         vector<double> curvature_list(result_path.size(), 0.0);
 
         for (size_t i = 0; i < result_path.size(); ++i)
@@ -362,183 +248,71 @@ extern "C"
         }
 
         // 将头尾数据的曲率设置为最近可计算点的曲率
-        if (localIndex > 0)
-        {
-            double a = curvature_list[2 * interval];
-            double b = LocalPathRefer[localIndex].k;
-            std::cout << " kappas smooth: " << localIndex << "," << abs(a - b) << "," << a << "," << b << std::endl;
-            if (abs(a - b) > 0.001 && (a > 0 && b > 0 && b < a) || (a < 0 && b < 0 && b > a))
-            {
-                fill(curvature_list.begin(), curvature_list.begin() + 2 * interval, LocalPathRefer[localIndex].k);
-            }
-            else
-            {
-                fill(curvature_list.begin(), curvature_list.begin() + 2 * interval, curvature_list[2 * interval]);
-            }
-        }
-        else
-        {
-            fill(curvature_list.begin(), curvature_list.begin() + 2 * interval, curvature_list[2 * interval]);
-        }
-
+        fill(curvature_list.begin(), curvature_list.begin() + 2 * interval, curvature_list[2 * interval]);
         fill(curvature_list.end() - 2 * interval, curvature_list.end(), curvature_list[result_path.size() - 2 * interval - 1]);
-        if (iscurvityTurn)
-        {
-            // 应用B样条平滑
-            int degree = 3;                                   // 三次B样条
-            double lambda = 0.003;                            // 平滑参数
-            int numControlPoints = curvature_list.size() / 3; // 控制点数量
-            std::vector<double> params(curvature_list.size());
-            // 创建参数化值 (0到1均匀分布)
-            params[0] = 0.0;
-            // 曲率自适应参数化
-            double alpha = 0.7;       // 曲率权重 (0-1)
-            double minSpacing = 0.01; // 最小参数间距
-            double maxSpacing = 0.1;  // 最大参数间距
 
-            int n = curvature_list.size();
-            // 1. 计算曲率
-            // 3. 计算基于曲率的权重
-            std::vector<double> weights(n, 0.0);
-            for (int i = 0; i < n; ++i)
-            {
-                weights[i] = (1.0 - alpha) + alpha * curvature_list[i];
-            }
-            std::vector<double> x;
-            for (int i = 0; i < n; ++i)
-            {
-                double t = static_cast<double>(i) / (n - 1);
-                x.push_back(t);
-            }
-            // 4. 计算弦长累积
-            std::vector<double> chordLengths(n, 0.0);
-            for (int i = 1; i < n; ++i)
-            {
-                double dx = x[i] - x[i - 1];
-                double dy = curvature_list[i] - curvature_list[i - 1];
-                chordLengths[i] = chordLengths[i - 1] + sqrt(dx * dx + dy * dy);
-            }
-
-            // 5. 计算加权累积距离
-            std::vector<double> weightedDists(n, 0.0);
-            for (int i = 1; i < n; ++i)
-            {
-                double dx = x[i] - x[i - 1];
-                double dy = curvature_list[i] - curvature_list[i - 1];
-                double dist = sqrt(dx * dx + dy * dy);
-                weightedDists[i] = weightedDists[i - 1] + dist * weights[i];
-            }
-
-            // 6. 生成自适应参数化
-            double totalWeightedDist = weightedDists.back();
-            for (int i = 0; i < n; ++i)
-            {
-                params[i] = weightedDists[i] / totalWeightedDist;
-            }
-
-            // 7. 确保参数单调递增并满足间距约束
-            for (int i = 1; i < n; ++i)
-            {
-                double delta = params[i] - params[i - 1];
-                if (delta < minSpacing)
-                {
-                    params[i] = params[i - 1] + minSpacing;
-                }
-                else if (delta > maxSpacing)
-                {
-                    params[i] = params[i - 1] + maxSpacing;
-                }
-            }
-
-            // 重新归一化到[0,1]
-            double finalMax = params.back();
-            for (double &p : params)
-            {
-                p /= finalMax;
-            }
-            std::vector<double> smoothed = bsplineCurvatureSmoothing(
-                curvature_list, params, degree, lambda, numControlPoints);
-
-            smoothed[smoothed.size() - 1] = smoothed[smoothed.size() - 2];
-            return smoothed;
-        }
-        // 应用B样条平滑
-        int degree = 3;           // 三次B样条
-        double lambda = 0.5;      // 平滑参数
-        int numControlPoints = 5; // curvature_list.size() / 7; // 控制点数量
-        double param;
-        std::vector<double> params(curvature_list.size());
-        // 创建参数化值 (0到1均匀分布)
-        params[0] = 0.0;
-        for (int i = 1; i < curvature_list.size(); ++i)
-        {
-            double dist = abs(curvature_list[i - 1] - curvature_list[i]);
-            params[i] = params[i - 1] + dist;
-        }
-        for (int i = 0; i < curvature_list.size(); ++i)
-        {
-            params[i] /= params.back();
-        }
-        std::vector<double> smoothed = bsplineCurvatureSmoothing(
-            curvature_list, params, degree, lambda, numControlPoints);
-        for (int i = 0; i < smoothed.size(); ++i)
-        {
-            if (smoothed[i] == 0)
-            {
-                if (smoothed.size() > 14 && smoothed[smoothed.size() - 13] != 0)
-                {
-                    smoothed[i] = smoothed[smoothed.size() - 13];
-                }
-                else
-                {
-                    smoothed[i] = curvature_list[i];
-                }
-            }
-        }
-        return smoothed;
+        return curvature_list;
     }
 
-    double regularize_angle(double radian_angle)
+    vector<Vec3d> B_spline(vector<Vec3d> pathPoints)
     {
-        if (radian_angle >= 4)
+        // B spline smoothing.
+        double length = 0;
+        for (size_t i = 0; i != pathPoints.size() - 1; ++i)
         {
-            radian_angle = -(radian_angle - 3.14 - 1.57);
+            length += std::sqrt(std::pow(pathPoints[i][0] - pathPoints[i + 1][0], 2) + std::pow(pathPoints[i][1] - pathPoints[i + 1][1], 2));
         }
-        else if (radian_angle <= -4)
+        int degree = 3;
+        double average_length = length / (pathPoints.size() - 1);
+        if (average_length > 10)
+            degree = 3;
+        else if (average_length > 5)
+            degree = 4;
+        else
+            degree = 5;
+
+        tinyspline::BSpline b_spline_raw(pathPoints.size(), 2, degree);
+        std::vector<tinyspline::real> ctrlp_raw = b_spline_raw.controlPoints();
+        for (size_t i = 0; i != pathPoints.size(); ++i)
         {
-            radian_angle = -(radian_angle + 3.14 + 1.45);
+            ctrlp_raw[2 * (i)] = pathPoints[i][0];
+            ctrlp_raw[2 * (i) + 1] = pathPoints[i][1];
+        }
+        b_spline_raw.setControlPoints(ctrlp_raw);
+        double delta_t = 1.0 / pathPoints.size();
+        double tmp_t = 0;
+        std::vector<double> x_list, y_list, s_list;
+        while (tmp_t < 1)
+        {
+            auto result = b_spline_raw.eval(tmp_t).result();
+            x_list.emplace_back(result[0]);
+            y_list.emplace_back(result[1]);
+            tmp_t += delta_t;
+        }
+        auto result = b_spline_raw.eval(1).result();
+        x_list.emplace_back(result[0]);
+        y_list.emplace_back(result[1]);
+        s_list.emplace_back(0);
+        for (size_t i = 1; i != x_list.size(); ++i)
+        {
+            double dis = sqrt(pow(x_list[i] - x_list[i - 1], 2) + pow(y_list[i] - y_list[i - 1], 2));
+            s_list.emplace_back(s_list.back() + dis);
         }
 
-        if (radian_angle >= 3.14)
+        tk::spline x_s, y_s;
+        x_s.set_points(s_list, x_list);
+        y_s.set_points(s_list, y_list);
+        vector<Vec3d> resultPoint;
+        Vec3d point;
+        for (size_t i = 0; i != x_list.size(); i++)
         {
-            radian_angle = radian_angle - M_PI;
+            point[0] = x_list[i];
+            point[1] = y_list[i];
+            point[2] = s_list[i];
+            resultPoint.push_back(point);
         }
-        else if (radian_angle <= -3.14)
-        {
-            radian_angle = radian_angle + M_PI;
-        }
-
-        if (radian_angle <= -M_PI / 2)
-        {
-            radian_angle = radian_angle + M_PI / 2.0;
-        }
-        else if (radian_angle >= M_PI / 2)
-        {
-            radian_angle = radian_angle - M_PI / 2.0;
-        }
-
-        if (radian_angle <= -0.785)
-        {
-            radian_angle = radian_angle + M_PI / 2.0;
-        }
-        else if (radian_angle >= 0.785)
-        {
-            radian_angle = radian_angle - M_PI / 2.0;
-        }
-
-        return radian_angle;
+        return resultPoint;
     }
-
     void referenceCb()
     {
         reference_path_plot.clear();
@@ -562,7 +336,7 @@ extern "C"
         referencePoint.push_back(point6);
         for (int i = 0; i < referencePoint.size(); i++)
         {
-            PathOptimizationNS::State reference_point;
+            PathPlanning::PathPoint reference_point;
             reference_point.x = referencePoint[i].x;
             reference_point.y = referencePoint[i].y;
             reference_path_plot.emplace_back(reference_point);
@@ -570,32 +344,36 @@ extern "C"
             std::cout << "referenceCb received a reference point" << referencePoint[i] << std::endl;
         }
     }
-    void referenceTurnPoint(int endIndex, int index, vector<Vec6d> pathPoints, double thX, double thY)
+
+    void referenceTurnPoint(int endIndex, int index, double thX, double thY)
     {
-        int num = (endIndex - index) / 10;
+        int num = (endIndex - index) / 6;
+        if (num == 0)
+        {
+            num = 1;
+        }
         reference_path_plot.clear();
         referencePoint.clear();
-        std::vector<double> kappas;
         double refX, refY;
-        for (size_t i = 0; i < endIndex - index + 1; i = i + num)
+        for (size_t i = 0; i < 5 * num + 1; i = i + num)
         {
             Point2d globalP, pathP;
-            globalP.x = pathPoints[index + i][0] + thX;
-            globalP.y = pathPoints[index + i][1] + thY;
-            pathP.x = globalP.x * cos(car_state.heading) + globalP.y * sin(car_state.heading);
-            pathP.y = -globalP.x * sin(car_state.heading) + globalP.y * cos(car_state.heading);
+            globalP.x = globalPathPoints[index + i][0] + thX;
+            globalP.y = globalPathPoints[index + i][1] + thY;
+            pathP.x = globalP.x * cos(car_state.theta) + globalP.y * sin(car_state.theta);
+            pathP.y = -globalP.x * sin(car_state.theta) + globalP.y * cos(car_state.theta);
             // pathP.x = globalP.x;
             // pathP.y = globalP.y;
 
             Point2d imagepathP, pixelP;
-            imagepathP.x = abs(pathP.x - car_state_local.x) - height / 2 * resolution;
+            imagepathP.x = abs(pathP.x - car_state_local.x) - width / 2 * resolution;
             imagepathP.y = pathP.y - car_state_local.y;
-            pixelP.x = height / 2 - imagepathP.y / resolution;
-            pixelP.y = width / 2 - imagepathP.x / resolution;
+            pixelP.x = width / 2 - imagepathP.y / resolution;
+            pixelP.y = height / 2 - imagepathP.x / resolution;
             Point2d endpixelP;
-            endpixelP.x = width / 2 - pixelP.y;
-            endpixelP.y = height / 2 - pixelP.x;
-            double xs = endpixelP.x * resolution;
+            endpixelP.x = height / 2 - pixelP.y;
+            endpixelP.y = width / 2 - pixelP.x;
+            double xs = endpixelP.x * resolution + 100 * resolution;
             double ys = endpixelP.y * resolution;
             cv::Point2f point0(xs, ys);
             if (i == 0)
@@ -604,200 +382,19 @@ extern "C"
                 refY = ys;
             }
             referencePoint.push_back(point0);
-            kappas.push_back(pathPoints[index + i][3]);
-            // double y = -xs / resolution + 74;
-            // double x = -ys / resolution + 96;
-            // cv::Point p(x, y);
-            // std::cout << "reference_path_plot111111: " << x << "," << y << std::endl;
         }
 
         double disX = refX - start_state.x;
         double disY = refY - start_state.y;
         for (int i = 0; i < referencePoint.size(); i++)
         {
-            PathOptimizationNS::State reference_point;
-            reference_point.x = referencePoint[i].x - disX + thX;
-            reference_point.y = referencePoint[i].y - disY + thY;
-            reference_point.k = kappas[i];
+            PathPlanning::PathPoint reference_point;
+            reference_point.x = referencePoint[i].x - disX;
+            reference_point.y = referencePoint[i].y - disY;
             reference_path_plot.emplace_back(reference_point);
             reference_rcv = reference_path_plot.size() >= 6;
-            // std::cout << "received a reference point" <<referencePoint[i]<< std::endl;
+            std::cout << "received a reference point" << referencePoint[i] << std::endl;
         }
-    }
-
-    bool Process(DiscretizedPath &discretizedPath_, TrajectoryPoint &init_point, SpeedData *const speed_data, std::vector<STBoundary> boundariesG, double max_speed, double total_length)
-    {
-
-        double FLAGS_planning_upper_speed_limit = 3.0;
-        if (speed_data == nullptr)
-        {
-            return false;
-        }
-        SpeedData reference_speed_data = *speed_data;
-
-        if (discretizedPath_.Length() == 0)
-        {
-            std::cout << "Empty path data" << std::endl;
-            return false;
-        }
-        std::array<double, 3> init_s = {0.0, init_point.v, init_point.a};
-
-        int num_of_knots = static_cast<int>((reference_speed_data.TotalTime()) / delta_t) + 1;
-
-        // 创建QP速度规划 对象
-        PiecewiseJerkSpeedProblem piecewise_jerk_problem(num_of_knots, delta_t, init_s);
-
-        piecewise_jerk_problem.set_weight_ddx(acc_weight);
-        piecewise_jerk_problem.set_weight_dddx(jerk_weight);
-
-        piecewise_jerk_problem.set_x_bounds(0.0, total_length);
-        piecewise_jerk_problem.set_dx_bounds(0.0, std::fmax(FLAGS_planning_upper_speed_limit, init_point.v));
-        piecewise_jerk_problem.set_ddx_bounds(max_deceleration, max_acceleration);
-        piecewise_jerk_problem.set_dddx_bound(longitudinal_jerk_lower_bound, longitudinal_jerk_upper_bound);
-        piecewise_jerk_problem.set_dx_ref(ref_v_weight, max_speed);
-
-        // Update STBoundary
-        // 设置 s 的上下界
-        std::vector<std::pair<double, double>> s_bounds;
-        for (int i = 0; i < num_of_knots; ++i)
-        {
-            double curr_t = i * delta_t;
-            double s_lower_bound = 0.0;
-            double s_upper_bound = total_length * 100;
-            for (const STBoundary boundary : boundariesG)
-            {
-                double s_lower = 0.0;
-                double s_upper = 0.0;
-                if (!boundary.GetUnblockSRange(curr_t, &s_upper, &s_lower))
-                {
-                    continue;
-                }
-                // 不同场景下的 上下界选取
-                switch (boundary.boundary_type())
-                {
-                case STBoundary::BoundaryType::STOP:  // 停车
-                case STBoundary::BoundaryType::YIELD: // 终止换道
-                    s_upper_bound = std::fmin(s_upper_bound, s_upper);
-                    break;
-                case STBoundary::BoundaryType::FOLLOW:                       // 跟车
-                    s_upper_bound = std::fmin(s_upper_bound, s_upper - 8.0); // 借了点膨胀区域“8.0”
-                    break;
-                case STBoundary::BoundaryType::OVERTAKE: // 超车
-                    s_lower_bound = std::fmax(s_lower_bound, s_lower);
-                    break;
-                default:
-                    break;
-                }
-            }
-            if (s_lower_bound > s_upper_bound)
-            {
-                std::cout << "s_lower_bound larger than s_upper_bound on STGraph" << std::endl;
-                ;
-                speed_data->clear();
-                return false;
-            }
-            s_bounds.emplace_back(s_lower_bound, s_upper_bound);
-        }
-        piecewise_jerk_problem.set_x_bounds(std::move(s_bounds));
-
-        // Update SpeedBoundary and ref_s
-        std::vector<double> x_ref;
-        std::vector<double> penalty_dx;
-        std::vector<std::pair<double, double>> s_dot_bounds;
-
-        for (int i = 0; i < num_of_knots; ++i)
-        {
-            double curr_t = i * delta_t;
-            // get path_s
-            SpeedPoint sp;
-            reference_speed_data.EvaluateByTime(curr_t, &sp);
-            const double path_s = sp.s;
-            // std::cout<<path_s<<std::endl;
-            x_ref.emplace_back(path_s);
-            // get curvature
-            PathPoint path_point = discretizedPath_.Evaluate(path_s);
-            penalty_dx.push_back(std::fabs(path_point.kappa) * kappa_penalty_weight);
-            // get v_upper_bound
-            const double v_lower_bound = 0.0;
-            double v_upper_bound = FLAGS_planning_upper_speed_limit;
-            v_upper_bound = speed_limit.GetSpeedLimitByS(path_s);
-            s_dot_bounds.emplace_back(v_lower_bound, std::fmax(v_upper_bound, 0.0));
-        }
-        piecewise_jerk_problem.set_x_ref(ref_s_weight, std::move(x_ref));
-        piecewise_jerk_problem.set_penalty_dx(penalty_dx);
-        piecewise_jerk_problem.set_dx_bounds(std::move(s_dot_bounds));
-
-        // Solve the problem
-        if (!piecewise_jerk_problem.Optimize())
-        {
-            std::cout << "Piecewise jerk speed optimizer failed!" << std::endl;
-            return false;
-        }
-
-        // Extract output
-        const std::vector<double> &s = piecewise_jerk_problem.opt_x();
-        const std::vector<double> &ds = piecewise_jerk_problem.opt_dx();
-        const std::vector<double> &dds = piecewise_jerk_problem.opt_ddx();
-        // for (int i = 0; i < num_of_knots; ++i)
-        // {
-        //     std::cout << "For t[" << i * delta_t << "], s = " << s[i] << ", v = " << ds[i]
-        //               << ", a = " << dds[i];
-        // }
-        speed_data->clear();
-        speed_data->AppendSpeedPoint(s[0], 0.0, ds[0], dds[0], 0.0);
-        for (int i = 1; i < num_of_knots; ++i)
-        {
-            // Avoid the very last points when already stopped
-            if (ds[i] <= 0.0)
-            {
-                break;
-            }
-            speed_data->AppendSpeedPoint(s[i], delta_t * i, ds[i], dds[i],
-                                         (dds[i] - dds[i - 1]) / delta_t);
-            // std::cout << "For s[" << i << "], s = " << s[i] << ", v = " << ds[i]
-            //           << ", a = " << dds[i] << ",t = " << delta_t * i << std::endl;
-        }
-        // SpeedProfileGenerator::FillEnoughSpeedPoints(speed_data);
-        return true;
-    }
-
-    // 线性插值函数
-    std::vector<double> linearInterpolation(const std::vector<double> &input, int newSize)
-    {
-        if (input.empty())
-            return {};
-        if (newSize <= input.size())
-            return input; // 如果新大小不大于原大小，直接返回
-        std::vector<double> output(newSize);
-        if (input.size() < 2)
-        {
-            for (int i = 0; i < newSize; ++i)
-            {
-                output[i] = 0;
-            }
-            return output;
-        }
-        double scale = static_cast<double>(input.size() - 1) / (newSize - 1);
-
-        for (int i = 0; i < newSize; ++i)
-        {
-            double pos = i * scale;
-            int left = static_cast<int>(pos);
-            double alpha = pos - left;
-
-            if (left + 1 < input.size())
-            {
-                // 线性插值公式: output = input[left] * (1 - alpha) + input[left+1] * alpha
-                output[i] = input[left] * (1.0 - alpha) + input[left + 1] * alpha;
-            }
-            else
-            {
-                // 处理最后一个元素的情况
-                output[i] = input.back();
-            }
-        }
-
-        return output;
     }
 
     // Init
@@ -829,50 +426,8 @@ extern "C"
         isFirst = true;
         width = 500;
         height = 500;
-        resolution = 0.1;
+        resolution = 0.02;
         updateFlag = false;
-        normal_speed = 2.7;
-        max_speed = normal_speed;
-        default_dp_config.unit_t = 1.0;
-        default_dp_config.dense_dimension_s = 201;
-        default_dp_config.dense_unit_s = 0.1;
-        default_dp_config.sparse_unit_s = 0.5;
-        default_dp_config.speed_weight = 0.0;
-        default_dp_config.accel_weight = 10.0;
-        default_dp_config.jerk_weight = 10.0;
-        default_dp_config.obstacle_weight = 1.0;
-        default_dp_config.reference_weight = 0.0;
-        default_dp_config.go_down_buffer = 5.0;
-        default_dp_config.go_up_buffer = 5.0;
-
-        default_dp_config.default_obstacle_cost = 1e4;
-
-        default_dp_config.default_speed_cost = 1.0e3;
-        default_dp_config.exceed_speed_penalty = 1.0e3;
-        default_dp_config.low_speed_penalty = 1.0;
-        default_dp_config.reference_speed_penalty = 10.0;
-        default_dp_config.keep_clear_low_speed_penalty = 10.0;
-        default_dp_config.accel_penalty = 1.0;
-        default_dp_config.decel_penalty = 1.0;
-
-        default_dp_config.positive_jerk_coeff = 1.0;
-        default_dp_config.negative_jerk_coeff = 1.0;
-
-        default_dp_config.max_acceleration = max_acceleration;
-        default_dp_config.max_deceleration = max_deceleration;
-        default_dp_config.spatial_potential_penalty = 1.0e2;
-        for (double s = 0; s < 200.0; s += 1.0)
-        {
-            speed_limit.AppendSpeedLimit(s, 3.0);
-        }
-        init_point_.path_point.x = 0.0;
-        init_point_.path_point.y = 0.0;
-        init_point_.path_point.z = 0.0;
-        init_point_.path_point.kappa = 0.0;
-        init_point_.v = 0.0;
-        init_point_.a = 0.0;
-        st_graph_data_ = StGraphData();
-        imageId = 0;
         printf("InitPathPlanning, ----------globalPath: %s \n", globalPath);
         // Ptr<ml::TrainData> mlDataX, mlDataY;
         // mlDataX = ml::TrainData::loadFromCSV("/app/slam/mapX.csv", 1);
@@ -914,13 +469,13 @@ extern "C"
         return iRet;
     }
 
-    static bool IsParamLegal(cv::Mat map, T_CarState tCarState, const char *tempFile)
+    static bool IsParamLegal(T_FreeSpaceImg tFreeSpaceImg, T_CarState tCarState, const char *tempFile)
     {
         bool bRet = true;
         // printf("isPare tempFile name: %s\n", tempFile);
-        if ((map.empty()) || (NULL == tempFile))
+        if ((NULL == tFreeSpaceImg.pucImg) || (NULL == tempFile))
         {
-            if (map.empty())
+            if ((NULL == tFreeSpaceImg.pucImg))
             {
                 e_PathPlanAlgErrorType = PathPlan_NO_IMAGE_YET;
             }
@@ -930,7 +485,7 @@ extern "C"
             }
 
             bRet = false;
-            printf("==========IsParamLegal check param is error, map.empty, tempFile: %s\n", tempFile);
+            printf("==========IsParamLegal check param is error, tFreeSpaceImg.pucImg: %x, tempFile: %s\n", tFreeSpaceImg.pucImg, tempFile);
         }
         return bRet;
     }
@@ -965,50 +520,49 @@ extern "C"
     }
 
     // 前视摄像头安装角度水平，鱼眼矫正后有0.7m盲区
-    int LocalPathPlanning(J3PerceptionData *j3p_data, T_CarState tCarState, const char *tempFile, bool readOver, bool needPath, bool isTurn, double laneDis, bool backPath, float *referPointX, float *referPointY, double cur_speed, double turnDistance, char *lidarinfo)
+    int LocalPathPlanning(T_FreeSpaceImg tFreeSpaceImg, T_CarState tCarState, const char *tempFile, bool readOver, bool needPath, bool isTurn, double laneDis, bool backPath, float *referPointX, float *referPointY)
     {
-        clock_t time1 = clock();
-        lidarInfo *tempLidarInfo = (lidarInfo *)lidarinfo;
-        // std::cout << "Lidar info object num: " << std::endl;
-        imageId++;
-        bool needPathNow = needPath;
         bool shortPath = false;
-        bool needPathObs = false;
-        // lidar speed judge
-        for (int i = 0; i < tempLidarInfo->objNum; i++)
+        int tempValue = 2;
+        // car current pose in odom axis convert to camera axis
+        tCarState.dTheta = tCarState.dTheta + 1.570796;
+        tCarState.dX = tCarState.dX; //+ 2 * cos(-tCarState.dTheta);
+        tCarState.dY = tCarState.dY; //- 2 * sin(-tCarState.dTheta);
+
+        // printf("begin local path planning\n");
+        int iRet = PathPlan_OK;
+        bool bIsParamLegal = false;
+
+        bIsParamLegal = IsParamLegal(tFreeSpaceImg, tCarState, tempFile);
+        if (false == bIsParamLegal)
         {
-            if (tempLidarInfo->objPoints[i].pointNum < 2 || tempLidarInfo->objPoints[i].points[0].z < 0)
+            printf("==========LocalPathPlanning input param is error!\n");
+            return PathPlan_FAILED;
+        }
+        if (isFirst || true == updateFlag)
+        {
+            printf("To init state\n");
+            init_state.x = tCarState.dX;
+            init_state.y = tCarState.dY;
+            updateFlag = false;
+        }
+        int numSize = LocalPath.size();
+        if (numSize > 0)
+        {
+            // std::cout << "local path: " << LocalPath.size() << "," << LocalPath[numSize - 1].x << "," << LocalPath[numSize - 1].y << std::endl;
+            if ((pow((tCarState.dX - LocalPath[numSize - 1].x), 2) + pow((tCarState.dY - LocalPath[numSize - 1].y), 2)) < 2.5)
             {
-                continue;
-            }
-            for (int j = 0; j < tempLidarInfo->objPoints[i].pointNum - 1; j++)
-            {
-                if (abs(tempLidarInfo->objPoints[i].points[j].y) < 0.8 && abs(tempLidarInfo->objPoints[i].points[j].x) < 2.0 && abs(tempLidarInfo->objPoints[i].points[j].x) > 0.0)
-                {
-                    max_speed = 0.0;
-                    // needPathNow = true;
-                    std::cout << "lidarinfo is close to obstacle 0.8: " << tempLidarInfo->objPoints[i].points[j].y << std::endl;
-                }
-                else if (abs(tempLidarInfo->objPoints[i].points[j].y) < 1.3 && abs(tempLidarInfo->objPoints[i].points[j].x) < 5.0)
-                {
-                    if (max_speed > 1.0)
-                    {
-                        max_speed = 1.2;
-                    }
-                    needPath = true;
-                    std::cout << "lidarinfo is close to obstacle 1.3: " << tempLidarInfo->objPoints[i].points[j].y << std::endl;
-                }
+                shortPath = true;
             }
         }
-        // draw map
-        Mat new_map;
-        unsigned long time;
-        std::vector<J3Obs> j3Obs;
-        bool optok = true;
+        double travelDistance = pow((init_state.x - tCarState.dX), 2) + pow((init_state.y - tCarState.dY), 2);
+        double targetDis = 20;
+        if (isTurn)
+        {
+            targetDis = 36;
+        }
         double minDistance = 10000;
-        double minLocalDis = 10000;
         int index = 0;
-        localIndex = 0;
         // find the path respecting point
         for (int i = 0; i < globalPathPoints.size(); i++)
         {
@@ -1019,188 +573,22 @@ extern "C"
                 index = i;
             }
         }
-        for (int i = 0; i < LocalPathRefer.size(); i++)
-        {
-            double distance = pow((tCarState.dX - LocalPathRefer[i].x), 2) + pow((tCarState.dY - LocalPathRefer[i].y), 2);
-            if (distance < minLocalDis)
-            {
-                minLocalDis = distance;
-                localIndex = i;
-            }
-        }
-        if (turnDistance < 20 && turnDistance > 10)
-        {
-            double maxmK = 0;
-            for (int i = index; i < index + 200; i++)
-            {
-                double kapps = globalPathPoints[i][3];
-                if (abs(kapps) > maxmK)
-                {
-                    maxmK = abs(kapps);
-                }
-            }
-            // if (maxmK > 0.06)
-            // {
-            //     optok = false;
-            // }
-            max_speed = 1.1; // m/s
-            needPath = true;
-            std::cout << "Too close to turn: " << max_speed << std::endl;
-        }
-        draw_map::draw_front_perception_gray(*j3p_data, new_map, time, j3Obs, optok, *tempLidarInfo);
-        // std::cout << "draw J3data end" << std::endl;
-        // car current pose in odom axis convert to camera axis
-        tCarState.dTheta = tCarState.dTheta + 1.570796;
-        tCarState.dX = tCarState.dX; //+ 2 * cos(-tCarState.dTheta);
-        tCarState.dY = tCarState.dY; //- 2 * sin(-tCarState.dTheta);
-        // target speed set
-        double refery, referx, TTCtime;
-        bool normalPath = false;
-        for (int i = 0; i < j3Obs.size(); i++)
-        {
-            bool is_oblique = false; // 横向的车以中心画Rect
-            if ((j3Obs[i].obs_angle > 42 && j3Obs[i].obs_angle < 160) ||
-                (j3Obs[i].obs_angle < -42 && j3Obs[i].obs_angle > -160))
-            {
-                is_oblique = true;
-            }
-            if (is_oblique)
-            {
-                double w = j3Obs[i].obs_width;
-                double h = j3Obs[i].obs_length;
-                j3Obs[i].obs_width = h;
-                j3Obs[i].obs_length = w;
-            }
-            referx = j3Obs[i].obs_x - j3Obs[i].obs_length / 2;
-            refery = abs(j3Obs[i].obs_y - j3Obs[i].obs_width / 2);
-            if (j3Obs[i].obs_pose_type == 2) // 后中点
-            {
-                referx = j3Obs[i].obs_x;
-                refery = abs(j3Obs[i].obs_y - j3Obs[i].obs_width / 2);
-            }
-            double max_x_time = 5;
-            double max_y_distance = 1.2;
-            if (j3Obs[i].obs_class == 2) // 障碍物的类型，范围0~4。类别0=INVALID,1 = VEHICLE,2 = PEDESTRIAN,3 = CYCLIST,4 = BICYCLE
-            {
-                max_x_time = 6;
-                max_y_distance = 1.5;
-            }
-            TTCtime = referx / (cur_speed + 2);
-            if (refery < max_y_distance)
-            {
-                if ((referx < 20 || (TTCtime < max_x_time && TTCtime > 1)))
-                {
-                    if (max_speed > 1.0 && max_speed != 0)
-                    {
-                        max_speed = 1.2;
-                    }
-                    needPathObs = true;
-                    needPath = true;
-                    // normalPath = true;
-                    std::cout << "Too close to an obstacle: " << TTCtime << "," << refery << std::endl;
-                }
-            }
-            if (refery < 1)
-            {
-                if (referx < 2)
-                {
-                    max_speed = 0.0;
-                    // needPath = true;
-                    std::cout << "Too close to an obstacle < 1 stop: " << referx << "," << refery << std::endl;
-                }
-            }
-            // std::cout << "j3 Obs: " << j3Obs[i].obs_x << "," << j3Obs[i].obs_y << "," << j3Obs[i].obs_width << "," << j3Obs[i].obs_length << std::endl;
-        }
-        if (needPathObs && true == updateFlag)
-        {
-            printf("To init obs state\n");
-            init_stateObs.x = tCarState.dX;
-            init_stateObs.y = tCarState.dY;
-        }
-        else if (needPathObs && false == updateFlag)
-        {
-            init_stateObs.x = tCarState.dX + 15;
-            init_stateObs.y = tCarState.dY + 10;
-        }
-        double travelDistanceObs = pow((init_stateObs.x - tCarState.dX), 2) + pow((init_stateObs.y - tCarState.dY), 2);
-        // printf("begin local path planning\n");
-        int iRet = PathPlan_OK;
-        // bool bIsParamLegal = false;
-        // bIsParamLegal = IsParamLegal(new_map, tCarState, tempFile);
-        // if (false == bIsParamLegal)
-        // {
-        //     printf("==========LocalPathPlanning input param is error!\n");
-        //     return PathPlan_FAILED;
-        // }
-
-        if (isFirst || true == updateFlag)
-        {
-            printf("To init state\n");
-            init_state.x = tCarState.dX;
-            init_state.y = tCarState.dY;
-            max_speed = normal_speed;
-            updateFlag = false;
-        }
-        int numSize = LocalPath.size();
-        if (numSize > 0)
-        {
-            // std::cout << "local path: " << LocalPath.size() << "," << LocalPath[numSize - 1].x << "," << LocalPath[numSize - 1].y << std::endl;
-            if ((pow((tCarState.dX - LocalPath[numSize - 1].x), 2) + pow((tCarState.dY - LocalPath[numSize - 1].y), 2)) < 64)
-            {
-                shortPath = true;
-            }
-        }
-        double travelDistance = pow((init_state.x - tCarState.dX), 2) + pow((init_state.y - tCarState.dY), 2);
-        // 7. 选取终点
-        double maxDis = 0;
-        int maxIndex = 32;
-        for (int i = 0; i < 64; i++)
-        {
-            double x = j3p_data->J3P_Freespace.contours_points[i].x;
-            if (x > maxDis)
-            {
-                maxDis = x;
-                maxIndex = i;
-            }
-        }
-        double targetFreespaceX = j3p_data->J3P_Freespace.contours_points[maxIndex].x;
-        double targetFreespaceY = j3p_data->J3P_Freespace.contours_points[maxIndex].y;
-        double targetDistance = (targetFreespaceX) * (targetFreespaceX) + targetFreespaceY * targetFreespaceY;
-
-        if (targetDistance > 1200)
-        {
-            targetDistance = 35 * 35;
-        }
         Point2d referPoint;
         referPoint.x = globalPathPoints[index][0];
         referPoint.y = globalPathPoints[index][1];
         *referPointX = referPoint.x;
         *referPointY = referPoint.y;
-        double targetDis = 20 * 20;
-        if (isTurn || turnDistance < 20)
+        if (1) //((isFirst || needPath || shortPath) || (travelDistance > targetDis && readOver == true))
         {
-            targetDis = 20 * 20;
-        }
-        else if (cur_speed < 2)
-        {
-            targetDis = 15 * 15;
-        }
-        std::cout << "planning :" << travelDistanceObs << "," << needPathObs << "," << needPath << "," << shortPath << "," << travelDistance << "," << std::endl;
-        double carAngle = regularize_angle(tCarState.dTheta);
-        if (!needPathNow && !shortPath && abs(carAngle > 0.2))
-        {
-            std::cout << "car theta is larger than 0.2" << std::endl;
-            return PathPlan_OK;
-        }
-        if ((isFirst || needPathNow || (needPath && travelDistance > 100) || shortPath) || (travelDistance > targetDis && readOver == true))
-        // if ((isFirst ||(needPathObs && travelDistanceObs > 100)|| needPathNow || shortPath) || (travelDistance > targetDis && readOver == true))
-        {
-            if (isTurn || turnDistance < 20)
+            std::cout << isFirst << "," << needPath << "," << shortPath << "," << travelDistance << "," << std::endl;
+            // LocalPath.clear();
+            if (g_sFreeSpaceGray.empty())
             {
-                iscurvityTurn = true;
+                g_sFreeSpaceGray.create(tFreeSpaceImg.uiHeight, tFreeSpaceImg.uiWidth, CV_8UC1);
             }
-            std::cout << "imageId: " << imageId << std::endl;
-            // imwrite("/app/slam/" + to_string(imageId) + "J3map.jpg", new_map); // 保存图
+
+            CopyMatImg(tFreeSpaceImg, g_sFreeSpaceGray);
+
             // read original path
             vector<Vec6d> pathPoints;
             pathPoints.assign(globalPathPoints.begin(), globalPathPoints.end());
@@ -1216,194 +604,184 @@ extern "C"
             if (pathDistance < 65)
             {
                 printf("the last path planning\n");
-                max_speed = 0.0;
                 iRet = PathPlan_LASTWRITE;
             }
+            // 0.DNN model get freespace and fisheye calibration
+            // 1.Bev Tansform
+            // printf("fisheye calibration and warp transform\n");
+            Mat image = g_sFreeSpaceGray;
             // 2. binaryImage to get Areas of exercise
             cv::Mat gray, binaryImage;
-            if (new_map.channels() == 3)
+            if (image.channels() == 3)
             {
-                cv::cvtColor(new_map, gray, COLOR_BGR2GRAY);
+                cv::cvtColor(image, gray, COLOR_BGR2GRAY);
             }
             else
             {
-                new_map.copyTo(gray);
+                image.copyTo(gray);
             }
             threshold(gray, binaryImage, 120, 255, 0);
-            // 111111111111111111111111111111111111111111111111111111111111111111111111111111111
-            vector<Point> points;
-            double cropX;
-            cv::Mat img_src;
-            findNonZero(binaryImage, points);
-            if (points.empty())
-            {
-                img_src = binaryImage;
-            }
-            else
-            {
-                Rect bb = boundingRect(points);
-                // std::cout << bb.x << bb.width << std::endl;
-                img_src = binaryImage(bb);
-                height = img_src.size().height;
-                width = img_src.size().width;
-                cropX = bb.x;
-            }
+            // cv::Mat warped_cut = binaryImage(cv::Rect(0, 200, 1920, 980));
+            // cv::copyMakeBorder(warped_cut, binaryImage, 0, 200, 0, 0, cv::BORDER_CONSTANT, cv::Scalar(255, 255, 255));
+            // 3. remove small object and dilate erode
+            // printf("remove small object and dilate erode\n");
+            Mat erodeImage, dilateImage;
+            Mat element1 = getStructuringElement(MORPH_ELLIPSE, Size(10, 10));
+            Mat element2 = getStructuringElement(MORPH_ELLIPSE, Size(19, 19));
+            Mat element3 = getStructuringElement(MORPH_ELLIPSE, Size(19, 19));
+            dilate(binaryImage, dilateImage, element1);
+            vector<vector<Point>> contours;
+            vector<Vec4i> hierarchy;
+
+            findContours(dilateImage, contours, hierarchy, RETR_LIST, CHAIN_APPROX_NONE);
+            int contSize = contours.size();
+            contours.erase(remove_if(contours.begin(), contours.end(),
+                                     [](const std::vector<cv::Point> &c)
+                                     { return cv::contourArea(c) < 3000; }),
+                           contours.end());
+            dilateImage.setTo(0);
+            cv::drawContours(dilateImage, contours, -1, cv::Scalar(255), cv::FILLED);
+            erode(dilateImage, erodeImage, element2);
+            dilate(erodeImage, dilateImage, element3);
+            // cv::imshow("erodeImage",erodeImage);
+            // cv::imshow("removeImage",dilateImage);
+            // cv::waitKey(0);
+            // 4.补全车前的盲区
+            // for (int i = 760; i < 1160; i++)
+            // {
+            //     for (int j = 1000; j < 1080; j++)
+            //     {
+            //         binaryImage.at<uchar>(j, i) = 255;
+            //     }
+            // }
+            cv::Mat warped_cut = dilateImage(cv::Rect(0, 40, width, height - 40));
+            cv::copyMakeBorder(warped_cut, dilateImage, 0, 40, 0, 0, cv::BORDER_CONSTANT, cv::Scalar(255, 255, 255));
+            // cv::imwrite("fullCar1.jpg", dilateImage);
+            // 5.去掉与起点不连接的“可行驶区域”
+            // findContours(dilateImage, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_NONE);
+            // // printf(contours.size());
+            // int i = 0;
+            // if (contours.size() > 1)
+            // {
+            //     vector<vector<Point>>::const_iterator itc = contours.begin();
+            //     while (itc != contours.end())
+            //     {
+            //         if (pointPolygonTest(contours[i], cv::Point(960, 1078), false) == -1)
+            //         {
+            //             itc = contours.erase(itc);
+            //         }
+            //         else
+            //         {
+            //             ++itc;
+            //             ++i;
+            //         }
+            //     }
+            //     dilateImage.setTo(0);
+            //     cv::drawContours(dilateImage, contours, -1, cv::Scalar(255), cv::FILLED);
+            //     // cv::imwrite("fullCar.jpg", dilateImage);
+            // }
             // 6. 选取终点,设定候选目标半径为 8m =
-            cv::Mat circleImage(img_src.size(), CV_8UC1, Scalar(0));
-            double targetPixel = targetFreespaceX / resolution;
-            vector<Point2d> centerPoint;
-            double downpixel = 50;
-            while (centerPoint.size() == 0)
-            {
-                // std::cout << targetPixel << "," << maxIndex << std::endl;
-                if (targetPixel > 500)
-                {
-                    targetPixel = 500;
-                }
-                else if (targetPixel - downpixel < 100)
-                {
-                    targetPixel = downpixel + 100;
-                }
-
-                circle(circleImage, Point(width / 2, height), targetPixel - downpixel, Scalar(255), 30);
-                cv::Mat interSection(img_src.size(), CV_8UC1, Scalar(0));
-                bitwise_and(circleImage, img_src, interSection);
-                // cv::imshow("interSection", circleImage);
-                // cv::waitKey(0);
-                vector<vector<Point>> contours;
-                vector<Vec4i> hierarchy;
-                findContours(interSection, contours, hierarchy, RETR_LIST, CHAIN_APPROX_NONE);
-
-                for (int i = 0; i < contours.size(); i++)
-                {
-                    // std::cout << cv::contourArea(contours[i]) << std::endl;
-                    if (cv::contourArea(contours[i]) > 500)
-                    {
-                        Moments M;
-                        Point2d point;
-                        M = moments(contours[i]);
-                        point.x = double(M.m10 / M.m00);
-                        point.y = double(M.m01 / M.m00);
-                        centerPoint.push_back(point);
-                        // circle(interSection, point, 5, Scalar(0, 0, 0), -1);
-                        // std::cout<<point<<std::endl;
-                    }
-                }
-                downpixel = downpixel * 2;
-                if (downpixel > 300)
-                {
-                    break;
-                }
-                // cv::imshow("interSection", interSection);
-                // cv::waitKey(0);
-            }
-            if (turnDistance < 30 && !isTurn)
-            {
-                targetDistance = 15 * 15;
-            }
-            if (centerPoint.size() > 0)
-            {
-                double centerX = (height - centerPoint[0].y) * resolution;
-                if (sqrt(targetDistance) > centerX)
-                {
-                    targetDistance = centerX * centerX;
-                }
-            }
-
+            // printf("choose target point with circle 8m\n");
+            cv::Mat circleImage(dilateImage.size(), CV_8UC1, Scalar(0));
+            double targetPixel = width - 50;
+            circle(circleImage, Point(width / 2, height), targetPixel, Scalar(255), 30);
+            // cv::imwrite("circleImage.jpg", circleImage);
+            // cv::imshow("circleImage", circleImage);
+            // cv::imshow("dilateImage", dilateImage);
+            // cv::waitKey(0);
+            cv::Mat interSection(dilateImage.size(), CV_8UC1, Scalar(0));
+            bitwise_and(circleImage, dilateImage, interSection);
+            // cv::imshow("interSection",interSection);
+            // cv::waitKey(0);
             // Initialize grid map from image.
+            cv::Mat img_src;
+            // cv::Mat img_src = dilateImage;
+            // dilateImage expand down 400 pixel for car length 4.9m
+            cv::copyMakeBorder(dilateImage, img_src, 0, 200, 0, 0, cv::BORDER_CONSTANT, cv::Scalar(255, 255, 255));
             grid_map::GridMap grid_map(std::vector<std::string>{"obstacle", "distance"});
             grid_map::GridMapCvConverter::initializeFromImage(
                 img_src, resolution, grid_map, grid_map::Position::Zero());
             // Add obstacle layer.
+            unsigned char OCCUPY = 0;
+            unsigned char FREE = 255;
             grid_map::GridMapCvConverter::addLayerFromImage<unsigned char, 1>(
-                img_src, "obstacle", grid_map);
-            PathOptimizationNS::Map map(grid_map);
+                img_src, "obstacle", grid_map, OCCUPY, FREE, 0.5);
             // Update distance layer.
             Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> binary = grid_map.get("obstacle").cast<unsigned char>();
             cv::distanceTransform(eigen2cv(binary), eigen2cv(grid_map.get("distance")),
                                   DIST_L2, DIST_MASK_PRECISE);
             grid_map.get("distance") *= resolution;
-            printf("find the path respecting point\n");
+            Test::Map map(grid_map);
             // 7. 选取终点
+            findContours(interSection, contours, hierarchy, RETR_LIST, CHAIN_APPROX_NONE);
+            vector<Point2d> centerPoint;
+            for (int i = 0; i < contours.size(); i++)
+            {
+                if (cv::contourArea(contours[i]) > 3000)
+                {
+                    Moments M;
+                    Point2d point;
+                    M = moments(contours[i]);
+                    point.x = double(M.m10 / M.m00);
+                    point.y = double(M.m01 / M.m00);
+                    centerPoint.push_back(point);
+                    // circle(interSection,point,5,Scalar(0,255,255),-1);
+                    // printf(centerPoint);
+                }
+            }
+            // cv::imshow("interSection",interSection);
+            // cv::waitKey(0);
+            printf("find the path respecting point\n");
             car_state.x = tCarState.dX;
             car_state.y = tCarState.dY;
-            car_state.heading = tCarState.dTheta;
-            std::cout << "carState: " << car_state.x << "," << car_state.y << "," << car_state.heading << std::endl;
+            car_state.theta = tCarState.dTheta;
             // path splicing
-            Point2d endpathPoint, endpathPoint_local;
+            int mDis = 10000;
+            int lIndex = 0;
+            // if (LocalPath.size() > 10)
+            // {
+            //     for (int i = 0; i < LocalPath.size(); i++)
+            //     {
+            //         double disP = pow((car_state.x - LocalPath[i].x), 2) + pow((car_state.y - LocalPath[i].y), 2);
+            //         if (disP < mDis)
+            //         {
+            //             mDis = disP;
+            //             lIndex = i;
+            //         }
+            //     }
+            //     if (sqrt(mDis) < 1)
+            //     {
+            //         car_state.x = LocalPath[lIndex].x;
+            //         car_state.y = LocalPath[lIndex].y;
+            //         // car_state.theta = LocalPath[lIndex].theta;
+            //     }
+            // }
+            // printf("find the end path point\n");
+            Point2d endpathPoint, referPoint_local, endpathPoint_local;
             int endIndex = 0;
-            if (isFirst || backPath)
+            double targetPath = (targetPixel * resolution) * (targetPixel * resolution);
+            if (isTurn && !backPath)
             {
-                targetDistance = 100;
+                targetPath = 200.0;
             }
-            else if (isTurn || turnDistance < 20)
-            {
-                targetDistance = 40 * 40;
-            }
-            else if (max_speed < 1.5)
-            {
-                targetDistance = 15 * 15;
-            }
-            std::cout << "targetDistance distance: " << targetDistance << std::endl;
             for (int i = index; i < pathPoints.size(); i++)
             {
                 double distance = pow((referPoint.x - pathPoints[i][0]), 2) + pow((referPoint.y - pathPoints[i][1]), 2);
                 // printf(i<<","<<pathPoints[i]<<"distance: "<<distance);
-                if (abs(abs(car_state.heading) - 1.57) < 0.5)
+                if (distance > targetPath)
                 {
-                    if (pow((referPoint.x - pathPoints[i][0]), 2) > 400)
-                    {
-                        endIndex = i;
-                        break;
-                    }
-                    else if (distance > targetDistance)
-                    {
-                        endIndex = i;
-                        break;
-                    }
-                    else
-                    {
-                        endIndex = pathPoints.size() - 1;
-                    }
+                    endIndex = i;
+                    break;
                 }
                 else
                 {
-                    if (pow((referPoint.y - pathPoints[i][1]), 2) > 400)
-                    {
-                        endIndex = i;
-                        break;
-                    }
-                    else if (distance > targetDistance)
-                    {
-                        endIndex = i;
-                        break;
-                    }
-                    else
-                    {
-                        endIndex = pathPoints.size() - 1;
-                    }
+                    endIndex = pathPoints.size() - 1;
                 }
-            }
-            int cca = index + endIndex / 3;
-            if (pathPoints[cca][4] < 1.3 && pathPoints[endIndex][4] < 1.3)
-            {
-                if (max_speed > 1.0)
-                {
-                    max_speed = 1.2;
-                }
-                std::cout << "reference speed is <1.2: " << pathPoints[endIndex][4] << std::endl;
             }
             double thX = car_state.x - pathPoints[index][0];
             double thY = car_state.y - pathPoints[index][1];
-            double thH = car_state.heading - pathPoints[index][2];
-            double thXlocal, thYlocal;
-            if (localIndex > 0)
-            {
-                thXlocal = LocalPathRefer[localIndex].x - pathPoints[index][0];
-                thYlocal = LocalPathRefer[localIndex].y - pathPoints[index][1];
-            }
             double thXL, thYL;
-            if (abs(thX) > 1.0 || abs(thY) > 1.0 || abs(thH) > 0.3)
+            if (abs(thX) > 1.5 || abs(thY) > 1.5)
             {
                 thXL = thX;
                 thYL = thY;
@@ -1413,60 +791,71 @@ extern "C"
                 thXL = 0;
                 thYL = 0;
             }
-            double addX = 0;
-            double addY = 0;
-            if (abs(thXlocal) > 0.2 || abs(thYlocal) > 0.2)
-            {
-                addX = thXlocal;
-                addY = thYlocal;
-            }
-            std::cout << "compensate value:" << thX << "," << thY << "," << thXL << "," << thYL << "," << thXlocal << "," << thYlocal << std::endl;
-            endpathPoint.x = pathPoints[endIndex][0];
-            endpathPoint.y = pathPoints[endIndex][1];
+            std::cout << "compensate value:" << thX << "," << thY << "," << thXL << "," << thYL << std::endl;
+            endpathPoint.x = pathPoints[endIndex][0] + thXL;
+            endpathPoint.y = pathPoints[endIndex][1] + thYL;
             std::cout << "referPoint: " << pathPoints[index][0] << "," << pathPoints[index][1] << "," << pathPoints[index][2] << std::endl;
-            if (localIndex > 0)
-            {
-                std::cout << "refer Local Point: " << LocalPathRefer[localIndex].x << "," << LocalPathRefer[localIndex].y << "," << LocalPathRefer[localIndex].k << std::endl;
-            }
             std::cout << "endpathPoint: " << pathPoints[endIndex][0] << "," << pathPoints[endIndex][1] << "," << pathPoints[endIndex][2] << std::endl;
-            if (endIndex - index < 2)
-            {
-                iRet = PathPlan_FAILED;
-                return iRet;
-            }
             // global to local
-            endpathPoint_local.x = endpathPoint.x * cos(car_state.heading) + endpathPoint.y * sin(car_state.heading);
-            endpathPoint_local.y = -endpathPoint.x * sin(car_state.heading) + endpathPoint.y * cos(car_state.heading);
-            car_state_local.x = car_state.x * cos(car_state.heading) + car_state.y * sin(car_state.heading);
-            car_state_local.y = -car_state.x * sin(car_state.heading) + car_state.y * cos(car_state.heading);
+            referPoint_local.x = referPoint.x * cos(car_state.theta) + referPoint.y * sin(car_state.theta);
+            referPoint_local.y = -referPoint.x * sin(car_state.theta) + referPoint.y * cos(car_state.theta);
+            endpathPoint_local.x = endpathPoint.x * cos(car_state.theta) + endpathPoint.y * sin(car_state.theta);
+            endpathPoint_local.y = -endpathPoint.x * sin(car_state.theta) + endpathPoint.y * cos(car_state.theta);
+            car_state_local.x = car_state.x * cos(car_state.theta) + car_state.y * sin(car_state.theta);
+            car_state_local.y = -car_state.x * sin(car_state.theta) + car_state.y * cos(car_state.theta);
 
             Point2d imagepathPoint, pixelpathPoint, endCentrPoint, endCentrPoint1, endCentrPoint2;
-            imagepathPoint.x = abs(endpathPoint_local.x - car_state_local.x) - height / 2 * resolution;
+            imagepathPoint.x = abs(endpathPoint_local.x - car_state_local.x) - width / 2 * resolution;
             imagepathPoint.y = endpathPoint_local.y - car_state_local.y;
             pixelpathPoint.x = width / 2 - imagepathPoint.y / resolution;
             pixelpathPoint.y = height / 2 - imagepathPoint.x / resolution;
-            double minDis = 10000;
-            double x = (height / 2 - pixelpathPoint.y) * resolution;
+            double minDis = 1000000;
+            double x = (height / 2 - pixelpathPoint.y) * resolution + 100 * resolution;
             double y = (width / 2 - pixelpathPoint.x) * resolution;
             grid_map::Position pose(x, y);
-            double angleCh = abs(pathPoints[endIndex - 20][2] - pathPoints[index][2]);
-            if (isFirst || backPath)
+            double angleCh = abs(pathPoints[endIndex + 5][2] - pathPoints[index][2]);
+            grid_map::Position pose1(x - 0.5, y);
+            grid_map::Position pose2(x + 0.5, y);
+            double dis = map.getObstacleDistance(pose);
+            double dis1 = map.getObstacleDistance(pose1);
+            double dis2 = map.getObstacleDistance(pose2);
+            std::cout << "map.getDistance pixelpathpoint: " << dis << "," << dis1 << "," << dis2 << std::endl;
+
+            double turndisX = 0;
+            double turndisY = 0;
+
+            if (dis1 > dis && dis1 > dis2)
+            {
+                turndisX = -0.5 * cos(-car_state.theta);
+                turndisY = 0;
+            }
+            else if (dis2 > dis && dis2 > dis1)
+            {
+                turndisX = 0.5 * cos(-car_state.theta);
+                turndisY = 0;
+            }
+
+            if (isFirst)
             {
                 std::cout << "use mapping path curvity points0" << std::endl;
                 LocalPath.clear();
-                PathOptimizationNS::State state;
-                for (size_t i = index; i < endIndex; i++)
+                PathPoint state;
+                for (size_t i = 0; i < pathPoints.size() - 1; i++)
                 {
-                    state.x = thXL + pathPoints[i][0];
-                    state.y = thYL + pathPoints[i][1];
-                    state.heading = pathPoints[i][2];
+                    state.x = pathPoints[i][0];
+                    state.y = pathPoints[i][1];
+                    state.theta = pathPoints[i][2];
+                    state.kappa = pathPoints[i][3];
+                    state.dl = pathPoints[i][4];
+                    state.ddl = pathPoints[i][5];
                     LocalPath.push_back(state);
                 }
-                std::vector<PathPoint> points;
-                geneatePathPoint(LocalPath, &points);
-                SpeedData speed_data;
-                generateSpeed(j3Obs, points, cur_speed, max_speed, &speed_data, tempFile);
-                max_speed = normal_speed;
+                if (LocalPath.size() < 10)
+                {
+                    iRet = PathPlan_PARKING;
+                    return iRet;
+                }
+                writeTempFile(LocalPath, tempFile);
                 updateFlag = true;
                 if (iRet != PathPlan_LASTWRITE)
                 {
@@ -1479,28 +868,23 @@ extern "C"
             {
                 std::cout << "use mapping path curvity points2" << std::endl;
                 LocalPath.clear();
-                PathOptimizationNS::State state;
+                PathPoint state;
                 for (size_t i = index; i < endIndex; i++)
                 {
-                    state.x = addX + pathPoints[i][0];
-                    state.y = addY + pathPoints[i][1];
-                    state.heading = pathPoints[i][2];
+                    state.x = thX + pathPoints[i][0] + turndisX;
+                    state.y = thY + pathPoints[i][1] + turndisY;
+                    state.theta = pathPoints[i][2];
+                    state.kappa = pathPoints[i][3];
+                    state.dl = pathPoints[i][4];
+                    state.ddl = pathPoints[i][5];
                     LocalPath.push_back(state);
                 }
-
-                if (LocalPath.size() < 5)
+                if (LocalPath.size() < 10)
                 {
-                    if (iRet != PathPlan_LASTWRITE)
-                    {
-                        iRet = PathPlan_PARKING;
-                    }
+                    iRet = PathPlan_PARKING;
                     return iRet;
                 }
-                std::vector<PathPoint> points;
-                geneatePathPoint(LocalPath, &points);
-                SpeedData speed_data;
-                generateSpeed(j3Obs, points, cur_speed, max_speed, &speed_data, tempFile);
-                max_speed = normal_speed;
+                writeTempFile(LocalPath, tempFile);
                 updateFlag = true;
                 if (iRet != PathPlan_LASTWRITE)
                 {
@@ -1508,97 +892,76 @@ extern "C"
                 }
                 return iRet;
             }
-            else if (!isTurn && turnDistance < 30 && (abs(thXlocal) > 0.2 || abs(thYlocal) > 0.2))
+            // else if (((angleCh > 0.3 || isTurn)&&dis>0) || needPath) // (&& dis > 1.0)
+            else if (angleCh > 0.3 || (isTurn && angleCh > 0.1) || needPath)
             {
-                normalPath = true;
-                std::cout << "isTurn car is too far to line" << thXL << std::endl;
-            }
-            else if (isTurn || turnDistance < 20 || angleCh > 0.2)
-            {
-                double mK = 0;
-                for (int i = index; i < endIndex; i++)
+                std::cout << "use mapping path curvity points3" << std::endl;
+                LocalPath.clear();
+                PathPoint state;
+                vector<Vec3d> pathPoint;
+                if (true)
                 {
-                    double kapps = pathPoints[i][3];
-                    if (abs(kapps) > mK)
+                    if (needPath)
                     {
-                        mK = abs(kapps);
-                    }
-                }
-                std::cout << "isTurn max kappas is: " << mK << std::endl;
-                if ((abs(thXlocal) > 0.5 || abs(thYlocal) > 0.5) || ((abs(thXlocal) > 0.2 || abs(thYlocal) > 0.2) && turnDistance > 10) || (turnDistance < 10 && mK < 0.04))
-                {
-                    max_speed = 1.1;
-                    std::cout << "isTurn thXL is too far to line" << mK << std::endl;
-                }
-                else
-                {
-                    std::cout << "use mapping path curvity points3" << std::endl;
-                    LocalPath.clear();
-                    PathOptimizationNS::State state;
-                    for (size_t i = index; i < endIndex; i++)
-                    {
-                        state.x = addX + pathPoints[i][0];
-                        state.y = addY + pathPoints[i][1];
-                        state.heading = pathPoints[i][2];
-                        LocalPath.push_back(state);
-                    }
-
-                    if (LocalPath.size() < 5)
-                    {
-                        if (iRet != PathPlan_LASTWRITE)
+                        for (size_t i = 0; i < pathPoints.size() - 1; i++)
                         {
-                            iRet = PathPlan_PARKING;
+                            state.x = pathPoints[i][0];
+                            state.y = pathPoints[i][1];
+                            state.theta = pathPoints[i][2];
+                            state.kappa = pathPoints[i][3];
+                            state.dl = pathPoints[i][4];
+                            state.ddl = pathPoints[i][5];
+                            LocalPath.push_back(state);
                         }
-                        return iRet;
                     }
-                    std::vector<PathPoint> points;
-                    geneatePathPoint(LocalPath, &points);
-                    SpeedData speed_data;
-                    max_speed = 1.1;
-                    generateSpeed(j3Obs, points, cur_speed, max_speed, &speed_data, tempFile);
-                    max_speed = normal_speed;
-                    updateFlag = true;
-                    if (iRet != PathPlan_LASTWRITE)
+                    else
                     {
-                        iRet = PathPlan_UPDATE;
+                        for (size_t i = index; i < endIndex - (tempValue - 1); i = i + tempValue)
+                        {
+                            state.x = pathPoints[i][0];
+                            state.y = pathPoints[i][1];
+                            state.theta = pathPoints[i][2];
+                            state.kappa = pathPoints[i][3];
+                            state.dl = pathPoints[i][4];
+                            state.ddl = pathPoints[i][5];
+                            LocalPath.push_back(state);
+                        }
                     }
+                }
+                if (LocalPath.size() < 10)
+                {
+                    iRet = PathPlan_PARKING;
                     return iRet;
                 }
+                writeTempFile(LocalPath, tempFile);
+                updateFlag = true;
+                if (iRet != PathPlan_LASTWRITE)
+                {
+                    iRet = PathPlan_UPDATE;
+                }
+                return iRet;
             }
             else if (centerPoint.size() == 0)
             {
                 std::cout << "use mapping path curvity points1" << std::endl;
-                if (max_speed > 1.0)
-                {
-                    max_speed = 1.2;
-                }
                 LocalPath.clear();
-                PathOptimizationNS::State state;
-                if (index + 120 < endIndex)
-                {
-                    endIndex = index + 120;
-                }
+                PathPoint state;
                 for (size_t i = index; i < endIndex; i++)
                 {
-                    state.x = addX + pathPoints[i][0];
-                    state.y = addY + pathPoints[i][1];
-                    state.heading = pathPoints[i][2];
+                    state.x = thX + pathPoints[i][0];
+                    state.y = thY + pathPoints[i][1];
+                    state.theta = pathPoints[i][2];
+                    state.kappa = pathPoints[i][3];
+                    state.dl = pathPoints[i][4];
+                    state.ddl = pathPoints[i][5];
                     LocalPath.push_back(state);
                 }
-
-                if (LocalPath.size() < 5)
+                if (LocalPath.size() < 10)
                 {
-                    if (iRet != PathPlan_LASTWRITE)
-                    {
-                        iRet = PathPlan_PARKING;
-                    }
+                    iRet = PathPlan_PARKING;
                     return iRet;
                 }
-                std::vector<PathPoint> points;
-                geneatePathPoint(LocalPath, &points);
-                SpeedData speed_data;
-                generateSpeed(j3Obs, points, cur_speed, max_speed, &speed_data, tempFile);
-                max_speed = normal_speed;
+                writeTempFile(LocalPath, tempFile);
                 updateFlag = true;
                 if (iRet != PathPlan_LASTWRITE)
                 {
@@ -1609,78 +972,281 @@ extern "C"
             isFirst = false; // plan time and pose time is not sync in the first time
             // if (centerPoint.size() == 0)
             // {
-            // printf("cannot find centerPoint\n");
-            // return PathPlan_NOCENTERPOINT;
+            //     printf("cannot find centerPoint\n");
+            //     return PathPlan_NOCENTERPOINT;
             // }
+            double xCen = (height / 2 - centerPoint[0].y) * resolution + 100 * resolution;
+            double yCen = (width / 2 - centerPoint[0].x) * resolution;
+            grid_map::Position poseCen(xCen, yCen);
+            double poseCenDistance = map.getObstacleDistance(poseCen);
+            double poseDistance = map.getObstacleDistance(pose);
+            std::cout << "map.getDistance center point and pixel point: " << poseCenDistance << "," << poseDistance << std::endl;
             // find the end point
             if (centerPoint.size() > 1)
             {
-                Point2d centerPointend;
                 for (int i = 0; i < centerPoint.size(); i++)
                 {
-                    double distY = pow((centerPoint[i].x - pixelpathPoint.x), 2);
-                    // std::cout << "dist:" << distY << std::endl;
-                    if (distY < minDis)
+                    double dist = pow((centerPoint[i].x - pixelpathPoint.x), 2) + pow((centerPoint[i].y - pixelpathPoint.y), 2);
+                    if (dist < minDis)
                     {
-                        minDis = distY;
-                        centerPointend = centerPoint[i];
+                        minDis = dist;
+                        endCentrPoint = centerPoint[i];
                     }
                 }
-                std::cout << "1centerPoint: " << centerPointend.x << "," << centerPointend.y << std::endl;
-                double xCen = (height / 2 - centerPointend.y) * resolution;
-                double yCen = (width / 2 - centerPointend.x) * resolution;
-                grid_map::Position poseCen(xCen, yCen);
-                double poseCenDistance = map.getObstacleDistance(poseCen);
-                double poseDistance = map.getObstacleDistance(pose);
+                std::cout << "1centerPoint: " << endCentrPoint.x << "," << endCentrPoint.y << std::endl;
                 double path_dis = sqrt(minDis) * resolution;
-                double distY = sqrt(pow((centerPointend.y - pixelpathPoint.y), 2)) * resolution;
-                std::cout << "poseDistance: " << poseDistance << "poseCenDistance:" << poseCenDistance << "path_dis:" << path_dis << std::endl;
-
-                if (poseDistance > 1.5)
+                std::cout << "path_dis: " << path_dis << "laneDis: " << laneDis << std::endl;
+                if (thXL > 0 || thYL > 0)
                 {
-                    endCentrPoint = pixelpathPoint;
-                }
-                else if (path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5)
-                {
-                    endCentrPoint = centerPointend;
+                    if (poseDistance > 2.0)
+                    {
+                        std::cout << "thXL>0 and thYL>0 and poseDistance: " << poseDistance << std::endl;
+                        endCentrPoint = pixelpathPoint;
+                    }
+                    else
+                    {
+                        std::cout << "thXL>0 and thYL>0 and poseCenDistance: " << poseCenDistance << std::endl;
+                        endCentrPoint = endCentrPoint;
+                    }
                 }
                 else
                 {
-                    endCentrPoint = pixelpathPoint;
+                    if (path_dis > 1.5 && poseDistance > 1.0)
+                    {
+                        std::cout << "1path_dis is larger than 1.5: " << path_dis << std::endl;
+                        endCentrPoint.x = pixelpathPoint.x;
+                        endCentrPoint.y = pixelpathPoint.y;
+                    }
+                    else if (laneDis >= 1.5 && pixelpathPoint.x > 250 && poseDistance > 0.5)
+                    {
+                        std::cout << "2laneDis is larger than 1.2: " << laneDis << std::endl;
+                        endCentrPoint.x = pixelpathPoint.x;
+                        endCentrPoint.y = pixelpathPoint.y;
+                    }
+                    else if (laneDis <= 0.8 && pixelpathPoint.x < 250 && poseDistance > 0.5)
+                    {
+                        std::cout << "3laneDis is small than 0.5: " << laneDis << std::endl;
+                        endCentrPoint.x = pixelpathPoint.x;
+                        endCentrPoint.y = pixelpathPoint.y;
+                    }
+                    else if (path_dis < 1.5 && laneDis >= 1.5 && centerPoint[0].x > 250 && poseCenDistance > 0.8)
+                    {
+                        std::cout << "4laneDis is larger than 1.2: " << laneDis << std::endl;
+                        endCentrPoint.x = endCentrPoint.x;
+                        endCentrPoint.y = endCentrPoint.y;
+                    }
+                    else if (path_dis < 1.5 && laneDis <= 0.8 && endCentrPoint.x < 250 && poseCenDistance > 0.8)
+                    {
+                        std::cout << "5laneDis is small than 0.5: " << laneDis << std::endl;
+                        endCentrPoint.x = endCentrPoint.x;
+                        endCentrPoint.y = endCentrPoint.y;
+                    }
+                    else if (angleCh < 0.5 && poseDistance > 0.8 && path_dis < 1.0)
+                    {
+                        std::cout << "6poseDistance is larger 0.8: " << poseDistance << std::endl;
+                        endCentrPoint = pixelpathPoint;
+                    }
+                    else if (path_dis > 1.0 && poseCenDistance > 1.0)
+                    {
+                        std::cout << "7poseCenDistance is larger than 1: " << poseCenDistance << std::endl;
+                        endCentrPoint.x = endCentrPoint.x;
+                        endCentrPoint.y = endCentrPoint.y;
+                    }
+                    else if (path_dis > 1.0 && poseDistance > 0.5)
+                    {
+                        std::cout << "8path_dis is larger than 1: " << path_dis << std::endl;
+                        endCentrPoint.x = pixelpathPoint.x;
+                        endCentrPoint.y = pixelpathPoint.y;
+                    }
                 }
             }
             else
             {
-                double dist = pow((centerPoint[0].x - pixelpathPoint.x), 2); // + pow((centerPoint[0].y - pixelpathPoint.y), 2);
-                double distY = sqrt(pow((centerPoint[0].y - pixelpathPoint.y), 2)) * resolution;
+                double dist = pow((centerPoint[0].x - pixelpathPoint.x), 2) + pow((centerPoint[0].y - pixelpathPoint.y), 2);
                 double path_dis = sqrt(dist) * resolution;
                 std::cout << "centerPoint: " << centerPoint[0].x << "," << centerPoint[0].y << "," << path_dis << std::endl;
-                double xCen = (height / 2 - centerPoint[0].y) * resolution;
-                double yCen = (width / 2 - centerPoint[0].x) * resolution;
-                grid_map::Position poseCen(xCen, yCen);
-                double poseCenDistance = map.getObstacleDistance(poseCen);
-                double poseDistance = map.getObstacleDistance(pose);
-                std::cout << "poseDistance: " << poseDistance << "poseCenDistance:" << poseCenDistance << "path_dis:" << path_dis << std::endl;
-
-                if (poseDistance > 1.5)
+                if (thXL > 0 || thYL > 0)
                 {
-                    endCentrPoint = pixelpathPoint;
-                }
-                else if (path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5)
-                {
-                    endCentrPoint = centerPoint[0];
+                    if (poseDistance > 2.0)
+                    {
+                        std::cout << "thXL>0 thYL>0 and poseDistance >0.5" << poseDistance << std::endl;
+                        endCentrPoint = pixelpathPoint;
+                    }
+                    else
+                    {
+                        std::cout << "thXL>0 thYL>0 and poseCenDistance >0.5" << poseCenDistance << std::endl;
+                        endCentrPoint.x = centerPoint[0].x;
+                        endCentrPoint.y = centerPoint[0].y;
+                    }
                 }
                 else
                 {
-                    endCentrPoint = pixelpathPoint;
+                    if (angleCh < 0.3 && (poseDistance > 2.0))
+                    {
+                        std::cout << "1path_dis is larger: " << path_dis << std::endl;
+                        endCentrPoint = pixelpathPoint;
+                    }
+                    else if (path_dis < 0.2)
+                    {
+                        if (poseCenDistance > poseDistance)
+                        {
+                            endCentrPoint = centerPoint[0];
+                        }
+                        else
+                        {
+                            endCentrPoint = pixelpathPoint;
+                        }
+                    }
+                    else if (poseDistance > 1.0)
+                    {
+                        std::cout << "1path_dis is larger: " << path_dis << std::endl;
+                        endCentrPoint = pixelpathPoint;
+                    }
+                    else if (poseCenDistance > poseDistance)
+                    {
+                        std::cout << "2path_dis is larger: " << path_dis << std::endl;
+                        endCentrPoint = centerPoint[0];
+                    }
+                    else if (poseDistance > poseCenDistance)
+                    {
+                        std::cout << "3path_dis is larger: " << path_dis << std::endl;
+                        endCentrPoint = pixelpathPoint;
+                    }
+                    else if (laneDis >= 1.5 && pixelpathPoint.x > 250 && poseDistance > 0.8)
+                    {
+                        std::cout << "4path_dis is larger than 1.2: " << path_dis << std::endl;
+                        endCentrPoint.x = pixelpathPoint.x;
+                        endCentrPoint.y = pixelpathPoint.y;
+                    }
+                    else if (laneDis <= 0.8 && laneDis > 0.1 && pixelpathPoint.x < 240 && poseDistance > 0.8)
+                    {
+                        std::cout << "5laneDis is small than 0.5: " << laneDis << std::endl;
+                        endCentrPoint.x = pixelpathPoint.x;
+                        endCentrPoint.y = pixelpathPoint.y;
+                    }
+                    else if (path_dis < 1.5 && laneDis >= 1.5 && centerPoint[0].x > 250 && poseCenDistance > 0.8)
+                    {
+                        std::cout << "6laneDis is larger than 1.2: " << laneDis << std::endl;
+                        endCentrPoint.x = centerPoint[0].x;
+                        endCentrPoint.y = centerPoint[0].y;
+                    }
+                    else if (path_dis < 1.5 && laneDis <= 0.8 && laneDis > 0.1 && centerPoint[0].x < 240 && poseCenDistance > 0.8)
+                    {
+                        std::cout << "7laneDis is small than 0.5: " << laneDis << std::endl;
+                        endCentrPoint.x = centerPoint[0].x;
+                        endCentrPoint.y = centerPoint[0].y;
+                    }
+                    else if (path_dis > 1.0 && poseDistance > 1.5)
+                    {
+                        std::cout << "8path_dis is larger than 1: " << path_dis << std::endl;
+                        endCentrPoint.x = pixelpathPoint.x;
+                        endCentrPoint.y = pixelpathPoint.y;
+                    }
+                    else if (path_dis > 1.0 && poseCenDistance > 1.5)
+                    {
+                        std::cout << "9path_dis is larger than 1: " << path_dis << std::endl;
+                        endCentrPoint.x = centerPoint[0].x;
+                        endCentrPoint.y = centerPoint[0].y;
+                    }
+                    else if (laneDis <= 1.5 && laneDis > 0.1)
+                    {
+                        if (pixelpathPoint.x < centerPoint[0].x && path_dis < 1.0 && poseDistance > 0.5)
+                        {
+                            endCentrPoint.x = pixelpathPoint.x;
+                            endCentrPoint.y = pixelpathPoint.y;
+                        }
+                        else if (pixelpathPoint.x < 252 && centerPoint[0].x > 250)
+                        {
+                            endCentrPoint.x = pixelpathPoint.x;
+                            endCentrPoint.y = pixelpathPoint.y;
+                        }
+                        else if (pixelpathPoint.x > 250 && centerPoint[0].x < 250)
+                        {
+                            endCentrPoint.x = centerPoint[0].x;
+                            endCentrPoint.y = centerPoint[0].y;
+                        }
+                        else if (path_dis > 1.5 && pixelpathPoint.x < 250 && poseDistance > 1.0)
+                        {
+                            endCentrPoint.x = pixelpathPoint.x;
+                            endCentrPoint.y = pixelpathPoint.y;
+                        }
+                        else if (poseDistance > poseCenDistance)
+                        {
+                            endCentrPoint.x = pixelpathPoint.x;
+                            endCentrPoint.y = pixelpathPoint.y;
+                        }
+                        else if (centerPoint[0].x < 250 && poseCenDistance > 1.0)
+                        {
+                            endCentrPoint.x = centerPoint[0].x;
+                            endCentrPoint.y = centerPoint[0].y;
+                        }
+                        else if (pixelpathPoint.x < centerPoint[0].x)
+                        {
+                            endCentrPoint = pixelpathPoint;
+                        }
+                        else
+                        {
+                            endCentrPoint = centerPoint[0];
+                        }
+                    }
+                    else if (laneDis > 1.5)
+                    {
+                        if (pixelpathPoint.x > centerPoint[0].x && path_dis < 1.0 && poseDistance > 1.0)
+                        {
+                            endCentrPoint.x = pixelpathPoint.x;
+                            endCentrPoint.y = pixelpathPoint.y;
+                        }
+                        else if (pixelpathPoint.x > 250 && centerPoint[0].x < 250)
+                        {
+                            endCentrPoint.x = pixelpathPoint.x;
+                            endCentrPoint.y = pixelpathPoint.y;
+                        }
+                        else if (pixelpathPoint.x < 250 && centerPoint[0].x > 250)
+                        {
+                            endCentrPoint = centerPoint[0];
+                        }
+                        else if (path_dis > 1.5 && pixelpathPoint.x > 250 && poseDistance > 1.0)
+                        {
+                            endCentrPoint.x = pixelpathPoint.x;
+                            endCentrPoint.y = pixelpathPoint.y;
+                        }
+                        else if (poseDistance > poseCenDistance)
+                        {
+                            endCentrPoint.x = pixelpathPoint.x;
+                            endCentrPoint.y = pixelpathPoint.y;
+                        }
+                        else if (centerPoint[0].x > 250 && poseCenDistance > 1.0)
+                        {
+                            endCentrPoint.x = centerPoint[0].x;
+                            endCentrPoint.y = centerPoint[0].y;
+                        }
+                        else if (centerPoint[0].x > pixelpathPoint.x)
+                        {
+                            endCentrPoint = centerPoint[0];
+                        }
+                        else
+                        {
+                            endCentrPoint = pixelpathPoint;
+                        }
+                    }
+                    else
+                    {
+                        endCentrPoint.x = centerPoint[0].x;
+                        endCentrPoint.y = centerPoint[0].y;
+                    }
                 }
             }
-            // find the end point
-            if (normalPath)
-            {
-                endCentrPoint = pixelpathPoint;
-            }
-            std::cout << "carState: " << car_state.x << "," << car_state.y << "," << car_state.heading << std::endl;
+
+            // double centerD = 1.0;
+            // if (isTurn)
+            // {
+            //     centerD = 2.0;
+            // }
+            // if (poseDistance > centerD)
+            // {
+            //     endCentrPoint = pixelpathPoint;
+            // }
+            std::cout << "carState: " << car_state.x << "," << car_state.y << "," << car_state.theta << std::endl;
             std::cout << "referPoint: " << referPoint << std::endl;
             std::cout << "endpathPoint: " << endpathPoint << std::endl;
             // std::cout << "imagepathPoint: " << imagepathPoint << std::endl;
@@ -1691,454 +1257,176 @@ extern "C"
             endpixelPoint.x = height / 2 - endCentrPoint.y;
             endpixelPoint.y = width / 2 - endCentrPoint.x;
             // set start state
-            // start_state.x = -height / 2 * resolution;
-            // start_state.y = 0.0 * resolution;
-            start_state.x = (-height / 2) * resolution;
-            start_state.y = (width / 2 - (250.0 - cropX)) * resolution;
+            start_state.x = -height / 2 * resolution + 100 * resolution;
+            start_state.y = 0.0 * resolution;
             // set end state
-            end_state.x = endpixelPoint.x * resolution;
+            end_state.x = endpixelPoint.x * resolution + 100 * resolution;
             end_state.y = endpixelPoint.y * resolution;
-            if (endIndex - index < 2)
+            double disx = (end_state.x - start_state.x) / 6;
+            double disy = (end_state.y - start_state.y) / 6;
+            double path_startTheta = 0;
+            if ((isTurn && angleCh > 0.1))
             {
-                iRet = PathPlan_FAILED;
-                return iRet;
-            }
-            // car_state.heading = -0.066;
-            if (true)
-            {
-                referenceTurnPoint(endIndex, index, pathPoints, thX, thY);
-                reference_path_plot.erase(reference_path_plot.begin());
-                int size = reference_path_plot.size();
-
-                grid_map::Position poseEnd(end_state.x, end_state.y);
-                double endDistance = map.getObstacleDistance(poseEnd);
-                grid_map::Position poseEnd1(end_state.x, end_state.y + 1);
-                double endDistance1 = map.getObstacleDistance(poseEnd1);
-                grid_map::Position poseEnd2(end_state.x, end_state.y + 2);
-                double endDistance2 = map.getObstacleDistance(poseEnd2);
-                grid_map::Position poseEnd3(end_state.x, end_state.y - 1);
-                double endDistance3 = map.getObstacleDistance(poseEnd3);
-                grid_map::Position poseEnd4(end_state.x, end_state.y - 2);
-                double endDistance4 = map.getObstacleDistance(poseEnd4);
-                if (endDistance < 0.1)
-                {
-                    if (endDistance1 > 1)
-                    {
-                        end_state.x = end_state.x;
-                        end_state.y = end_state.y + 1;
-                    }
-                    else if (endDistance2 > 1)
-                    {
-                        end_state.x = end_state.x;
-                        end_state.y = end_state.y + 2;
-                    }
-                    else if (endDistance3 > 1)
-                    {
-                        end_state.x = end_state.x;
-                        end_state.y = end_state.y - 1;
-                    }
-                    else if (endDistance4 > 1)
-                    {
-                        end_state.x = end_state.x;
-                        end_state.y = end_state.y - 2;
-                    }
-                }
-                double theAngle = atan((reference_path_plot[1].y - start_state.y) / (reference_path_plot[1].x - start_state.x));
-                double theAngle2 = regularize_angle(car_state.heading);
-                // if (abs(theAngle - theAngle2) < 0.2)
+                referenceTurnPoint(endIndex, index, thX, thY);
+                // double distancel;
+                // for (size_t i = 0; i != reference_path_plot.size(); ++i)
                 // {
-                //     start_state.heading = theAngle2;
+                //     grid_map::Position pose(reference_path_plot[i].x, reference_path_plot[i].y);
+                //     distancel = map.getObstacleDistance(pose);
+                //     if (distancel < 2.0)
+                //     {
+                //         reference_path_plot[i].x = start_state.x + disx * i;
+                //         reference_path_plot[i].y = start_state.y + disy * i;
+                //     }
+                // }
+                int size = reference_path_plot.size();
+                // double theL = atan((reference_path_plot[size - 1].y - end_state.y) / (reference_path_plot[size - 1].x - end_state.x));
+                // if ((abs(theL - 1.56) < 0.1 && distancel > 1.0))
+                // {
+                //     end_state.x = reference_path_plot[size - 1].x;
+                //     end_state.y = reference_path_plot[size - 1].y;
+                // }
+                // else if (abs(theL - 1.56) < 0.1)
+                // {
+                //     reference_path_plot[size - 1].x = end_state.x;
+                //     reference_path_plot[size - 1].y = end_state.y;
                 // }
                 // else
                 // {
-                //     start_state.heading = theAngle;
+                //     reference_path_plot.emplace_back(end_state);
                 // }
-                start_state.heading = 0;
-                end_state.heading = start_state.heading + pathPoints[endIndex][2] - pathPoints[index][2];
-                std::cout << "theAngle and regulater angle :" << theAngle << "," << theAngle2 << "," << std::endl;
-                std::cout << "turn start state: " << start_state.x << "," << start_state.y << "," << start_state.heading << std::endl;
-                std::cout << "turn end state: " << end_state.x << "," << end_state.y << "," << end_state.heading << std::endl;
+
+                double the_start = atan((reference_path_plot[3].y - start_state.y) / (reference_path_plot[3].x - start_state.x));
+                // double the_end = atan((reference_path_plot[size - 1].y - reference_path_plot[size - 4].y) / (reference_path_plot[size - 1].x - reference_path_plot[size - 4].x));
+                // if ((the_end > 0 && pathPoints[endIndex][2] < 0) || (the_end < 0 && pathPoints[endIndex][2] > 0))
+                // {
+                //     the_end = pathPoints[endIndex][2];
+                // }
+                start_state.theta = path_startTheta;
+                end_state.theta = path_startTheta + pathPoints[endIndex][2] - pathPoints[index][2];
+                std::cout << "turn start state: " << start_state.x << "," << start_state.y << "," << start_state.theta << std::endl;
+                std::cout << "turn end state: " << end_state.x << "," << end_state.y << "," << end_state.theta << std::endl;
+            }
+            else
+            {
+                double the = atan((end_state.y - start_state.y) / (end_state.x - start_state.x));
+                end_state.theta = path_startTheta + pathPoints[endIndex][2] - pathPoints[index][2];
+                start_state.theta = path_startTheta; // pathPoints[index][2];
+                std::cout << "start state: " << start_state.x << "," << start_state.y << "," << start_state.theta << std::endl;
+                std::cout << "end state: " << end_state.x << "," << end_state.y << "," << end_state.theta << std::endl;
+
+                // referenceTurnPoint(endIndex, index, thX, thY);
+                referenceCb();
+                /**for (size_t ii = 1; ii != 2; ++ii)
+                {
+                    // int ii = 2;
+                    grid_map::Position pose2(reference_path_plot[ii].x, reference_path_plot[ii].y);
+                    double distance = map.getObstacleDistance(pose2);
+                    // std::cout << "reference path obstacle distance: " <<reference_path_plot[ii].x<<","<<reference_path_plot[ii].y<<","<< distance << std::endl;
+                    double right_y, left_y;
+                    if (distance < 1.0)
+                    {
+                        double x = reference_path_plot[ii].x;
+                        for (double y = -9.7; y < 9.7; y = y + 0.1)
+                        {
+                            grid_map::Position pose1(x, y);
+                            // std::cout<<x<<","<<y<<","<<map.getObstacleDistance(pose1)<<std::endl;
+                            if (map.getObstacleDistance(pose1) > 0)
+                            {
+                                right_y = y;
+                                break;
+                            }
+                        }
+                        for (double y = 9.7; y > -9.7; y = y - 0.1)
+                        {
+                            grid_map::Position pose1(x, y);
+                            // std::cout<<x<<","<<y<<","<<map.getObstacleDistance(pose1)<<std::endl;
+                            if (map.getObstacleDistance(pose1) > 0)
+                            {
+                                left_y = y;
+                                break;
+                            }
+                        }
+                        reference_path_plot[ii].y = right_y + (left_y - right_y) / 2;
+                        double the = atan((reference_path_plot[ii].y - start_state.y) / (reference_path_plot[ii].x - start_state.x));
+                        start_state.theta = the; // car_state.theta;pathPoints[index][2];
+                    }
+                }**/
             }
 
             //  8.路径规划目标,路径平滑
-            // Calculate.
-            std::vector<PathOptimizationNS::SlState> result_path;
-            std::vector<PathOptimizationNS::State> smoothed_reference_path;
-            double maxKappas = 0;
-            if (reference_rcv)
-            {
-                int referDistancenum = 0;
-                PathOptimizationNS::PathOptimizer path_optimizer(start_state, end_state, grid_map);
-                for (int i = 0; i < reference_path_plot.size(); i++)
-                {
-                    double distance = path_optimizer.calDisObs(reference_path_plot[i].x, reference_path_plot[i].y);
-                    if (abs(reference_path_plot[i].k) > maxKappas)
-                    {
-                        maxKappas = abs(reference_path_plot[i].k);
-                    }
-                    if (distance >= 1.0)
-                    {
-                        referDistancenum++;
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
-                std::cout << "reference path point distance num : " << referDistancenum << "," << maxKappas << std::endl;
-                if (referDistancenum >= 5 && abs(thXlocal) < 0.2 && abs(thYlocal) < 0.2 && maxKappas < 0.03 && !normalPath)
-                {
-                    std::cout << "use mapping path curvity points4" << std::endl;
-                    LocalPath.clear();
-                    PathOptimizationNS::State state;
-                    for (size_t i = index; i < endIndex; i++)
-                    {
-                        state.x = addX + pathPoints[i][0];
-                        state.y = addY + pathPoints[i][1];
-                        state.heading = pathPoints[i][2];
-                        LocalPath.push_back(state);
-                    }
+            //  grid map = dilateImage centerPoint
+            Test::ReferenceLineProcessor reference_line_processor(reference_path_plot, map, start_state);
+            std::shared_ptr<PathPlanning::ReferenceLine> ref_line_ptr = std::make_shared<PathPlanning::ReferenceLine>();
+            std::shared_ptr<PathPlanning::FreeSpace> free_space_ptr = std::make_shared<PathPlanning::FreeSpace>();
+            reference_line_processor.solve(ref_line_ptr, free_space_ptr);
 
-                    if (LocalPath.size() < 5)
-                    {
-                        if (iRet != PathPlan_LASTWRITE)
-                        {
-                            iRet = PathPlan_PARKING;
-                        }
-                        return iRet;
-                    }
-                    std::vector<PathPoint> points;
-                    geneatePathPoint(LocalPath, &points);
-                    SpeedData speed_data;
-                    generateSpeed(j3Obs, points, cur_speed, max_speed, &speed_data, tempFile);
-                    max_speed = normal_speed;
-                    updateFlag = true;
-                    if (iRet != PathPlan_LASTWRITE)
-                    {
-                        iRet = PathPlan_UPDATE;
-                    }
-                    return iRet;
-                }
-                // calcualte distance from obstacle
-                bool opt_ok = path_optimizer.solve(reference_path_plot, &result_path);
-                std::cout << "plan state: " << opt_ok << std::endl;
-                if (opt_ok)
-                {
-                    std::cout << "ok!" << std::endl;
-                }
-                else
-                {
-                    std::cout << "plan is failed!" << std::endl;
-                    iRet = PathPlan_FAILED;
-                    return iRet;
-                }
-                reference_path_opt = path_optimizer.getReferencePath();
-                smoothed_reference_path.clear();
-                if (!PathOptimizationNS::isEqual(reference_path_opt.getLength(), 0.0))
-                {
-                    double s = 0.0;
-                    // std::cout<<reference_path_opt.getLength()<<std::endl;
-                    while (s < reference_path_opt.getLength())
-                    {
-                        smoothed_reference_path.emplace_back(reference_path_opt.getXS()(s), reference_path_opt.getYS()(s));
-                        s += 0.5;
-                    }
-                }
-                // path_optimizer.printObstacleDistance2(smoothed_reference_path);
-                // printf("-------------------------------------------------------");
-                // path_optimizer.printObstacleDistance(result_path);
+            // solve
+            PathPlanning::PathProblemManager path_problem_manager;
+            path_problem_manager.formulate_path_problem(*free_space_ptr, *ref_line_ptr, start_state, end_state);
+            Solver::ILQRSolver<PathPlanning::N_PATH_STATE, PathPlanning::N_PATH_CONTROL> ilqr_solver(path_problem_manager);
+            ILQRSolveStatus solve_status = ilqr_solver.solve();
+            const auto &opt_path_raw = ilqr_solver.final_trajectory();
+            const auto result = PathProblemManager::transform_to_path_points(*ref_line_ptr, opt_path_raw);
+            if (solve_status != ILQRSolveStatus::SOLVED)
+            {
+                std::cout << "solver status is failed!" << std::endl;
+                iRet = PathPlan_FAILED;
+                return iRet;
             }
-            double angle = -car_state.heading;
-            double disX, disY;
-            PathOptimizationNS::State state;
-            std::cout << "angle: " << angle << std::endl;
-            double localX = LocalPathRefer[localIndex + 3].x;
-            double localY = LocalPathRefer[localIndex + 3].y;
+
+            double angle = -car_state.theta;
             LocalPath.clear();
-            for (size_t i = 0; i < result_path.size() - 1; i = i + 1)
+            double disX, disY;
+            PathPoint state;
+            std::cout << "angle: " << angle << std::endl;
+            for (size_t i = 0; i < result.size() - (tempValue - 1); i = i + tempValue)
             {
-                const auto path_point = result_path.at(i);
-                disX = (path_point.x - start_state.x) * cos(angle) + (path_point.y - start_state.y) * sin(angle);
-                disY = -(path_point.x - start_state.x) * sin(angle) + (path_point.y - start_state.y) * cos(angle);
-
-                if (localIndex > 0 && abs(thXlocal) < 0.8 && abs(thYlocal) < 0.8)
-                {
-                    state.x = localX + disX;
-                    state.y = localY + disY;
-                }
-                else
-                {
-                    state.x = car_state.x + disX;
-                    state.y = car_state.y + disY;
-                }
-
-                state.heading = path_point.heading + (car_state.heading - start_state.heading);
+                const auto path_point = result.at(i);
+                disX = (path_point.x + (width / 2 - 100) * resolution) * cos(angle) + path_point.y * sin(angle);
+                disY = -(path_point.x + (width / 2 - 100) * resolution) * sin(angle) + path_point.y * cos(angle);
+                state.x = car_state.x + disX;
+                state.y = car_state.y + disY;
+                state.theta = path_point.theta - angle;
                 LocalPath.push_back(state);
-                // draw plan path to image
-                double y = -path_point.x / resolution + height / 2;
-                double x = -path_point.y / resolution + width / 2;
-                cv::Point p(x, y);
-                circle(img_src, p, 1, cv::Scalar(0, 0, 0), -1);
             }
-            if (result_path.size() < 5)
+            if (LocalPath.size() < 10)
             {
                 if (iRet != PathPlan_LASTWRITE)
+                {
+                    iRet = PathPlan_FAILED;
+                }
+                else
                 {
                     iRet = PathPlan_PARKING;
                 }
                 return iRet;
             }
-            else
-            {
-                for (size_t i = 0; i != reference_path_plot.size(); ++i)
-                {
-                    grid_map::Position pose(reference_path_plot[i].x, reference_path_plot[i].y);
-                    // std::cout << "reference path obstacle distance: " << map.getObstacleDistance(pose) << std::endl;
-                    double y = -reference_path_plot[i].x / resolution + height / 2;
-                    double x = -reference_path_plot[i].y / resolution + width / 2;
-                    cv::Point p(x, y);
-                    // std::cout << "reference_path_plot: " << x << "," << y << std::endl;
-                    circle(img_src, p, 3, cv::Scalar(0, 0, 0), -1);
-                }
-                cv::imwrite("/app/slam/map_plan.jpg", img_src);
-                std::vector<PathPoint> points;
-                geneatePathPoint(LocalPath, &points);
-                SpeedData speed_data;
-                generateSpeed(j3Obs, points, cur_speed, max_speed, &speed_data, tempFile);
-            }
-
-            // restore parameters
-            max_speed = normal_speed;
+            writeTempFile(LocalPath, tempFile);
             updateFlag = true;
-            if (iRet != PathPlan_LASTWRITE)
-            {
-                iRet = PathPlan_UPDATE;
-            }
         }
-        clock_t time2 = clock();
-        cout << "LocalPathPlanning_time:" << double(time2 - time1) / 1000 << "ms" << std::endl;
         return iRet;
     }
 
-    void generateSpeed(std::vector<J3Obs> j3Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data, const char *tempFile)
+    void writeTempFile(std::vector<PathPoint> resultPath, const char *tempFile)
     {
-        LocalPathRefer.clear();
-        PathOptimizationNS::State localRefer;
-        std::cout << "generate speed: " << points.size() << std::endl;
-        // create static obstacles
-        STObstaclesProcessor st_obstacles_processor_;
-        DiscretizedPath discretizedPath(points);
-        double total_length = sqrt(pow((points[points.size() - 1].x - points[0].x), 2) + pow((points[points.size() - 1].y - points[0].y), 2));
-        std::cout << "discretizedPath Length: " << total_length << std::endl;
-        // Map all related obstacles onto ST-Graph.
-        auto time1 = std::chrono::system_clock::now();
-        st_obstacles_processor_.Init(discretizedPath.Length(),
-                                     total_time, discretizedPath);
-        // create  obstacle
-        std::vector<Obstacle> Obstacles;
-        for (int i = 0; i < j3Obs.size(); i++)
-        {
-            // create static obstacle
-            if (j3Obs[i].obs_x < 4) //(j3Obs[i].is_static)
-            {
-                double rex, rey;
-
-                rex = j3Obs[i].obs_x - j3Obs[i].obs_length / 2;
-                rey = abs(j3Obs[i].obs_y - j3Obs[i].obs_width / 2);
-
-                if (j3Obs[i].obs_pose_type == 2) // 后中点
-                {
-                    rex = j3Obs[i].obs_x;
-                    rey = abs(j3Obs[i].obs_y - j3Obs[i].obs_width / 2);
-                }
-                Box2d box({rex, rey}, j3Obs[i].obs_angle, j3Obs[i].obs_width, j3Obs[i].obs_length);
-                std::unique_ptr<Obstacle> obs = Obstacle::CreateStaticVirtualObstacles("abc", box);
-                Obstacle obstacle = *obs;
-                Obstacles.push_back(obstacle);
-            }
-            // if (false) // create dynamic obstacle
-            // {
-            //     PredictionObstacles prediction_obstacles;
-            //     std::vector<PredictionObstacle> predictionObstacles;
-            //     PredictionObstacle predictionObstacle;
-            //     // first obstacle
-            //     {
-            //         PerceptionObstacle perception_obstacle;
-            //         perception_obstacle.id = j3Obs[i].obs_id; // 2156;
-            //         perception_obstacle.position.x = j3Obs[i].obs_x;
-            //         perception_obstacle.position.y = j3Obs[i].obs_y;
-            //         perception_obstacle.position.z = 0; // j3Obs[i].obs_z;
-            //         perception_obstacle.theta = j3Obs[i].obs_angle;
-            //         perception_obstacle.velocity.x = j3Obs[i].obs_x_abs_vel;
-            //         perception_obstacle.velocity.y = j3Obs[i].obs_y_abs_vel;
-            //         perception_obstacle.velocity.z = j3Obs[i].obs_z_abs_vel;
-            //         perception_obstacle.length = j3Obs[i].obs_length;
-            //         perception_obstacle.width = j3Obs[i].obs_width;
-            //         perception_obstacle.height = j3Obs[i].obs_height;
-            //         std::vector<Point3D> polygon_point;
-            //         for (int i = 0; i < obs_contour_point_vaild_num; i++)
-            //         {
-            //             Point3D po;
-            //             po.x = j3Obs[i].contour_point[i].x;
-            //             po.y = j3Obs[i].contour_point[i].y;
-            //             po.z = 0;
-            //             polygon_point.push_back(po);
-            //         }
-            //         perception_obstacle.polygon_point = polygon_point;
-            //         perception_obstacle.timestamp = 0;
-            //         perception_obstacle.tracking_time = 0;
-            //         perception_obstacle.type = PerceptionObstacle::VEHICLE;
-            //         double timestamp = 1171064942.14;
-            //         double predicted_period = 5000;
-            //         // can have multiple trajectories per obstacle
-            //         std::vector<TrajectoryObstacle> trajectory;
-            //         TrajectoryObstacle TrObs;
-            //         TrObs.probability = 0.614;
-            //         std::vector<TrajectoryPoint> trajectory_point;
-            //         // point1
-            //         for (int i = 0; i < trajectory_point_vaild_num; i++)
-            //         {
-            //             TrajectoryPoint point;
-            //             point.relative_time = j3Obs[i].trajectory[i].relative_time;
-            //             point.v = j3Obs[i].trajectory[i].v_x;
-            //             point.path_point.x = j3Obs[i].trajectory[i].x;
-            //             point.path_point.y = j3Obs[i].trajectory[i].y;
-            //             point.path_point.z = 0;
-            //             point.path_point.theta = j3Obs[i].trajectory[i].theat;
-            //             trajectory_point.push_back(point);
-            //         }
-            //         TrObs.trajectory_point = trajectory_point;
-            //         // estimated obstacle intent
-            //         trajectory.push_back(TrObs);
-            //         ObstacleIntent intent;
-            //         ObstaclePriority priority;
-            //         bool is_static;
-
-            //         predictionObstacle.perception_obstacle = perception_obstacle;
-            //         predictionObstacle.timestamp = timestamp;
-            //         predictionObstacle.predicted_period = predicted_period;
-            //         predictionObstacle.trajectory = trajectory;
-            //         predictionObstacle.is_static = false;
-            //         //  predictionObstacle.priority
-            //     }
-            //     predictionObstacles.push_back(predictionObstacle);
-            //     prediction_obstacles.prediction_obstacle = predictionObstacles;
-            //     std::list<std::unique_ptr<Obstacle>> obs2 = Obstacle::CreateObstacles(prediction_obstacles);
-            //     for (auto &obstacle : obs2)
-            //     {
-            //         Obstacle obstacle2 = *obstacle;
-            //         Obstacles.push_back(obstacle2);
-            //     }
-            // }
-        }
-
-        st_obstacles_processor_.MapObstaclesToSTBoundaries(Obstacles);
-        auto time2 = std::chrono::system_clock::now();
-        std::chrono::duration<double> diff = time2 - time1;
-        std::cout << "Time for ST Obstacles Processing = " << diff.count() * 1000 << " msec." << std::endl;
-
-        std::list<Obstacle> obstacle_list_;
-        for (int i = 0; i < Obstacles.size(); i++)
-        {
-            obstacle_list_.push_back(Obstacles[i]);
-        }
-        std::vector<const Obstacle *> obstacles_;
-        obstacles_.emplace_back(&(obstacle_list_.back()));
-
-        auto all_st_boundaries = st_obstacles_processor_.GetAllSTBoundaries();
-        std::vector<const STBoundary *> boundaries;
-        std::vector<STBoundary> boundariesG;
-        for (const auto &st_boundary : all_st_boundaries)
-        {
-            boundaries.push_back(&st_boundary.second);
-            boundariesG.push_back(st_boundary.second);
-        }
-        std::cout << "boundaries size: " << boundaries.size() << std::endl;
-        if (cur_speed < 0.5)
-        {
-            cur_speed = 0.5;
-        }
-        init_point_.v = cur_speed;
-        std::cout << "speed information: " << cur_speed << "," << max_speed << std::endl;
-        st_graph_data_.LoadData(boundaries, 30.0, init_point_, speed_limit, max_speed,
-                                total_length, total_time);
-        std::cout << "create dp_st_graph " << std::endl;
-        GriddedPathTimeGraph dp_st_graph(st_graph_data_, default_dp_config, obstacles_,
-                                         init_point_);
-
-        std::cout << "begin search speed: " << std::endl;
-        auto ret = dp_st_graph.Search(speed_data);
-        std::cout << "begin process speed: " << std::endl;
-        if (total_length > 9 && ret)
-        {
-            ret = Process(discretizedPath, init_point_, speed_data, boundariesG, max_speed, total_length);
-        }
-        SpeedData reference_speed_data = *speed_data;
-        std::cout << "reference_speed_data size: " << reference_speed_data.size() << std::endl;
-        std::vector<double> valitys;
-        std::vector<double> acceles;
-        for (int i = 0; i < reference_speed_data.size(); i++)
-        {
-            // std::cout<<"v: "<<speed_data[i].v<<" a: "<<speed_data[i].a<<std::endl;
-            valitys.push_back(reference_speed_data[i].v);
-            acceles.push_back(reference_speed_data[i].a);
-        }
-        if (reference_speed_data.size() < 2)
-        {
-            valitys.push_back(1.2);
-            acceles.push_back(0);
-        }
-        std::vector<double> interValitys = linearInterpolation(valitys, points.size());
-        std::vector<double> interAcceles = linearInterpolation(acceles, points.size());
-        if (max_speed == 0)
-        {
-            interValitys[points.size() - 1] = 0;
-            interAcceles[points.size() - 1] = 0;
-        }
-        // std::cout<<interpolated.size()<<std::endl;
-        // for(int i=0;i<interpolated.size();i++)
-        // {
-        //   std::cout<<"interpolated size: "<<interpolated[i]<<std::endl;
-        // }
-
-        string tempFilename2 = string(tempFile);
-        ofstream outFile2(tempFilename2.c_str(), ios::out | ios::binary);
+        string tempFilename = string(tempFile) + "lqr.txt";
+        ofstream outFile2(tempFilename.c_str(), ios::out | ios::binary);
         savePose *savepose = new savePose;
-        int id2 = 0;
-        for (size_t i = 0; i != points.size(); ++i)
-        {
-            id2++;
-            savepose->id = id2;
-            savepose->x = points[i].x;
-            savepose->y = points[i].y;
-            savepose->z = 0;
-            savepose->theta = points[i].theta;
-            savepose->kappas = points[i].kappa;
-            savepose->v = interValitys[i];
-            savepose->a = interAcceles[i];
-            localRefer.x = points[i].x;
-            localRefer.y = points[i].y;
-            localRefer.heading = points[i].theta;
-            localRefer.k = points[i].kappa;
-            LocalPathRefer.push_back(localRefer);
-            outFile2.write((char *)savepose, sizeof(savePose));
-        }
-        outFile2.close();
-        delete savepose;
-    }
-
-    void geneatePathPoint(std::vector<PathOptimizationNS::State> resultPath, std::vector<PathPoint> *pointspath)
-    {
+        int id = 0;
         std::cout << "path length" << resultPath.size() << std::endl;
         // write result path to tempFile
-        Eigen::Vector3d xyr;
         vector<Eigen::Vector2d> points;
         PiecewiseBezierCurve<2> curve;
+        std::vector<double> valutiys;
+        std::vector<double> acceles;
         for (size_t i = 0; i != resultPath.size(); ++i)
         {
             Eigen::Vector2d p;
             p.x() = resultPath[i].x;
             p.y() = resultPath[i].y;
+            valutiys.push_back(resultPath[i].dl);
+            acceles.push_back(resultPath[i].ddl);
             points.push_back(p);
         }
         curve.fit(points, 0.01);
@@ -2157,19 +1445,12 @@ extern "C"
         }
         result_path.erase(unique(result_path.begin(), result_path.end()), result_path.end());
         std::cout << "remove duplicate elements" << result_path.size() << std::endl;
-        if (max_speed > 1.2)
-        {
-            if (result_path.size() < 70)
-            {
-                max_speed = 1.2;
-            }
-            else if (result_path.size() < 102)
-            {
-                max_speed = 2.0;
-            }
-        }
         vector<double> curvitys = calculate_curvature_difference(result_path);
+        int id2 = 0;
         cout << "Saving trajectory ..." << endl;
+
+        std::vector<double> interacceleras = linearInterpolation(acceles, result_path.size());
+        std::vector<double> interValitys = linearInterpolation(valutiys, result_path.size());
         // write result path to tempFile
         std::vector<double> x_set, y_set, s_set, heading;
         for (size_t i = 0; i != result_path.size(); ++i)
@@ -2186,29 +1467,112 @@ extern "C"
             s_set.push_back(tmp_s);
             // std::cout<<tmp_s<<std::endl;
         }
-        PathOptimizationNS::tk::spline x_s, y_s;
+        tk::spline x_s, y_s;
         x_s.set_points(s_set, x_set);
         y_s.set_points(s_set, y_set);
         for (int i = 0; i < s_set.size(); i++)
         {
-            double h = PathOptimizationNS::getHeading(x_s, y_s, s_set[i]);
+            double h = path::getHeading(x_s, y_s, s_set[i]);
             heading.push_back(h);
         }
         for (size_t i = 0; i != result_path.size(); ++i)
         {
-            PathPoint point;
-            point.x = result_path[i].x;
-            point.y = result_path[i].y;
-            point.theta = heading[i]; //+ (car_state.heading - start_state.heading);
-            point.kappa = curvitys[i];
-            point.s = std::hypot(point.x, point.y);
-            pointspath->push_back(point);
-            if (abs(curvitys[i]) > 0.08)
+            id2++;
+            savepose->id = id2;
+            savepose->x = result_path[i].x;
+            savepose->y = result_path[i].y;
+            savepose->z = 0;
+            savepose->theta = heading[i];// + car_state.theta;
+            savepose->kappas = curvitys[i];
+            savepose->v = interValitys[i];
+            savepose->a = interacceleras[i];
+            outFile2.write((char *)savepose, sizeof(savePose));
+        }
+        outFile2.close();
+        delete savepose;
+    }
+
+    int writeMemory(T_lqrPose *lqrPose)
+    {
+        std::cout << "path length" << LocalPath.size() << std::endl;
+        // write result path to tempFile
+        vector<Eigen::Vector2d> points;
+        PiecewiseBezierCurve<2> curve;
+        for (size_t i = 0; i != LocalPath.size(); ++i)
+        {
+            Eigen::Vector2d p;
+            p.x() = LocalPath[i].x;
+            p.y() = LocalPath[i].y;
+            points.push_back(p);
+        }
+        curve.fit(points, 0.01);
+        // resample point
+        vector<Point2f> result_path;
+        for (Bezier<3, 2> b : curve.getPiecewiseBeziers())
+        {
+            for (auto &p : b.sampleWithArcLengthParameterized(0.1, true, 5))
             {
-                // std::cout << "max curvitys is larger than 0.1" << std::endl;
-                max_speed = 1.2;
+                // circle(img, {int(p[0]*10), int(p[1]*10+200)}, 0.2, {0, 0, 255}, -1);
+                Point2f po;
+                po.x = p[0];
+                po.y = p[1];
+                result_path.push_back(po);
             }
         }
+        result_path.erase(unique(result_path.begin(), result_path.end()), result_path.end());
+        std::cout << "remove duplicate elements" << result_path.size() << std::endl;
+        vector<double> curvitys = calculate_curvature_difference(result_path);
+        int id2 = 0;
+        cout << "Saving trajectory ..." << endl;
+        vector<double> valuity(result_path.size(), 0.83);
+        // for (size_t i = 0; i < result_path.size(); ++i)
+        // {
+        //     if (curvitys[i] > 0.03)
+        //     {
+        //         for (int j = 0; j < 80; j++)
+        //         {
+        //             valuity[i + j] = 1.94 - 0.014 * j;
+        //         }
+        //         break;
+        //     }
+        // }
+        // write result path to tempFile
+        std::vector<double> x_set, y_set, s_set, heading;
+        for (size_t i = 0; i != result_path.size(); ++i)
+        {
+            x_set.push_back(result_path[i].x);
+            y_set.push_back(result_path[i].y);
+        }
+        s_set.push_back(0);
+        double tmp_s = 0;
+        for (size_t i = 1; i != result_path.size(); ++i)
+        {
+            double dis = sqrt(pow(result_path[i].x - result_path[i - 1].x, 2) + pow(result_path[i].y - result_path[i - 1].y, 2));
+            tmp_s = tmp_s + dis;
+            s_set.push_back(tmp_s);
+            // std::cout<<tmp_s<<std::endl;
+        }
+        tk::spline x_s, y_s;
+        x_s.set_points(s_set, x_set);
+        y_s.set_points(s_set, y_set);
+        for (int i = 0; i < s_set.size(); i++)
+        {
+            double h = path::getHeading(x_s, y_s, s_set[i]);
+            heading.push_back(h);
+        }
+        for (size_t i = 0; i != result_path.size(); ++i)
+        {
+            id2++;
+            (lqrPose + i)->id = id2;
+            (lqrPose + i)->x = result_path[i].x;
+            (lqrPose + i)->y = result_path[i].y;
+            (lqrPose + i)->z = 0;
+            (lqrPose + i)->theta = heading[i];// + car_state.theta;
+            (lqrPose + i)->kappas = curvitys[i];
+            (lqrPose + i)->v = valuity[i];
+            (lqrPose + i)->a = 0;
+        }
+        return result_path.size();
     }
 
     int GetPathPlanningAlgErrorType(E_PathPlanAlgErrorType *pepathAlgErrorType)

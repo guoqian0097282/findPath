@@ -113,7 +113,6 @@ extern "C"
     static bool isFirst;
     static bool updateFlag;
     static double max_speed; // m/s pathPoints[endIndex].v
-    static double normal_speed;
     // ##########################################################################################################
     // speed set
     static int imageId;
@@ -132,11 +131,14 @@ extern "C"
     static double longitudinal_jerk_upper_bound = 2.0;
     static double total_time = 20;
     static double delta_t = 0.1;
+    static std::deque<cv::Mat> globalSequence;
+    static int max_size = 400;
+    static double centerBeginPixel = 80;
     static int CopyMatImg(T_FreeSpaceImg tFreeSpaceImg, cv::Mat &matDst);
     static void ColorTransformation(cv::Mat cvImgIn, cv::Mat &cvImgOut);
     static void geneatePathPoint(std::vector<PathOptimizationNS::State> result_path, std::vector<PathPoint> *points);
-    static void generateSpeed(std::vector<T_Obs> Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data,vector<T_lqrPose> *resultPose);
-    static int LocalPathPlanning(const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState, bool needPath, double cur_speed,vector<T_lqrPose> *vectorLqrPose);
+    static int generateSpeed(std::vector<T_Obs> Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data,vector<T_lqrPose> *resultPose);
+    static int LocalPathPlanning(T_FreeSpaceImg tFreeSpaceImg, const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState, bool needPath, vector<T_lqrPose> *vectorLqrPose);
     // ##########################################################################################################
 
     // B样条基函数计算
@@ -527,7 +529,7 @@ extern "C"
         double refX, refY;
         for (size_t i = 0; i < endIndex - index + 1; i = i + num)
         {
-            double xs = pathPoints[index + i][1] - height/2*resolution + 0.8;  //参考线生成的时候，是以height-80的位置作为车辆的起始点
+            double xs = pathPoints[index + i][1] - height/2*resolution + centerBeginPixel*resolution/10;  //参考线生成的时候，是以height-80的位置作为车辆的起始点
             double ys = -pathPoints[index + i][0] + width/2*resolution; // 移动坐标系，以图像中心点为原点
             cv::Point2f point0(xs, ys);
             referencePoint.push_back(point0);
@@ -547,6 +549,30 @@ extern "C"
             reference_rcv = reference_path_plot.size() >= 6;
             std::cout << "received a reference point" <<referencePoint[i]<< std::endl;
         }
+    }
+
+    static int CopyMatImg(T_FreeSpaceImg tFreeSpaceImg, cv::Mat &matDst)
+    {
+        int iRet = PathPlan_OK;
+        int iIndex = 0, jIndex = 0;
+        int iRows = tFreeSpaceImg.uiHeight;
+        int iCols = tFreeSpaceImg.uiWidth;
+        unsigned char *pucDstImgRowsPtr = NULL;
+        unsigned char *pucSrcImgRowsPtr = NULL;
+
+        for (iIndex = 0; iIndex < iRows; iIndex++)
+        {
+            pucSrcImgRowsPtr = tFreeSpaceImg.pucImg + iIndex * iCols;
+            pucDstImgRowsPtr = matDst.ptr(iIndex);
+            for (jIndex = 0; jIndex < iCols; jIndex++)
+            {
+                // matDst.at<unsigned char>(iIndex, jIndex) = tOrbSlamImg.pucImg[iIndex*iCols+jIndex];
+                //*(pucDstImgRowsPtr+jIndex) = *(pucSrcImgRowsPtr + jIndex);
+                *pucDstImgRowsPtr++ = *pucSrcImgRowsPtr++;
+            }
+        }
+
+        return iRet;
     }
 
     //速度规划
@@ -617,7 +643,6 @@ extern "C"
             if (s_lower_bound > s_upper_bound)
             {
                 std::cout << "s_lower_bound larger than s_upper_bound on STGraph" << std::endl;
-                ;
                 speed_data->clear();
                 return false;
             }
@@ -733,8 +758,7 @@ extern "C"
         height = 500;
         resolution = 0.01;
         updateFlag = false;
-        normal_speed = 1.2;
-        max_speed = normal_speed;
+        max_speed = 1.2;
         default_dp_config.unit_t = 1.0;
         default_dp_config.dense_dimension_s = 201;
         default_dp_config.dense_unit_s = 0.1;
@@ -797,14 +821,11 @@ int main()
     int height = 1080; //图像高
     int num_frames = 400;   //图像数量
     double resolution = 0.01;  //图像分辨率
-    bool debug = true;
+    bool debug = false;
     int max_history = 15;  //最大参考帧，用于时序平滑中心点的寻找
     
     // 生成测试序列
-    std::cout << "\nGenerating test sequence..." << std::endl;
-    // auto sequence = generateTestSequence(num_frames, width, height);
-    std::vector<cv::Mat> sequence;
-    for(int i=135;i<500;i++)
+    for(int i=100;i<500;i++)
     {
         width = 1920;  //图像宽
         height = 1080; //图像高
@@ -823,17 +844,21 @@ int main()
             cv::cvtColor(image, image, cv::COLOR_BGR2GRAY);
         }
         threshold(image, image, 120, 255, 0);
-        // 道路宽度最多是6米，所以对图像超出6米范围的区域进行不可同行区域的处理，方便寻找中心线
+        // 道路宽度最多是6米，所以对图像超出6米范围的区域进行不可通行区域的处理，方便寻找中心线
         image.colRange(width/2+300,width).setTo(0);
         image.colRange(0,width/2-300).setTo(0);
-        sequence.push_back(image);
+        if(globalSequence.size() > max_size)
+        {
+            globalSequence.pop_front();
+        }
+        globalSequence.push_back(image);
     }
-    std::cout << "  Generated " << sequence.size() << " frames" << std::endl;
+    std::cout << "  Generated " << globalSequence.size() << " frames" << std::endl;
     
     // 车辆位置（图像底部中央）
-    cv::Point2d vehicle_pos(width / 2.0 * resolution, (height - 80) * resolution);
+    cv::Point2d vehicle_pos(width / 2.0 * resolution, (height - centerBeginPixel) * resolution);
     std::cout << "  Vehicle position: (" << vehicle_pos.x << ", " << vehicle_pos.y << ") m" << std::endl;
-    std::cout << "  Expected path length: ~" << (height - 80) * resolution << " m\n" << std::endl;
+    std::cout << "  Expected path length: ~" << (height - centerBeginPixel) * resolution << " m\n" << std::endl;
     
     // 创建处理器
     CenterlineExtractor extractor(resolution, debug);
@@ -857,13 +882,13 @@ int main()
     auto total_start = std::chrono::high_resolution_clock::now();
     std::vector<_lqrPose> lqrResultPose;
     
-    for (int frame_id = 0; frame_id < num_frames; ++frame_id) {
+    for (int frame_id = 0; frame_id < globalSequence.size(); ++frame_id) {
         double timestamp = frame_id * 0.1;
         
         auto frame_start = std::chrono::high_resolution_clock::now();
         
         // 1. 提取中心线
-        auto points = extractor.extract(sequence[frame_id]);
+        auto points = extractor.extract(globalSequence[frame_id]);
         
         // 2. 校正偏左/偏右
         points = corrector.correct(points);
@@ -882,7 +907,7 @@ int main()
         frame.frame_id = frame_id;
         frame.timestamp = timestamp;
         frame.points = points;
-        frame.image = sequence[frame_id].clone();
+        frame.image = globalSequence[frame_id].clone();
         
         // 6. 计算统计信息
         frame.path_length = 0;
@@ -926,7 +951,7 @@ int main()
         
         // 可视化
         if (frame_id % 1 == 0) {
-            visualizer.show(sequence[frame_id], fused.points, vehicle_pos, frame_id, fused.lateral_offset);
+            visualizer.show(globalSequence[frame_id], fused.points, vehicle_pos, frame_id, fused.lateral_offset);
         }
         //打印找到的中心点信息
         //for(int i=0;i<fused.points.size();i++)
@@ -956,8 +981,9 @@ int main()
         std::vector<T_Obs> Obs;
         //############################################begin path plan#########################
         vector<T_lqrPose> vectorLqrPose;
+        T_FreeSpaceImg tFreeSpaceImg;
         //进行局部路径规划
-        LocalPathPlanning(sequence[frame_id], Obs, fused.points, tCarState,true,0, &vectorLqrPose);
+        LocalPathPlanning(tFreeSpaceImg,globalSequence[frame_id], Obs, fused.points, tCarState,true, &vectorLqrPose);
         std::cout<<"vectorLqrPose size: "<<vectorLqrPose.size()<<std::endl;
         //clear the struct
         IpcSignal_Road_Det_TrackType *pTrack = (IpcSignal_Road_Det_TrackType*)malloc(sizeof(IpcSignal_Road_Det_TrackType));
@@ -1003,10 +1029,16 @@ int main()
     return 0;
 }
     // 前视摄像头安装角度水平，鱼眼矫正后有0.7m盲区
-    int LocalPathPlanning(const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState,  bool needPath, double cur_speed,vector<T_lqrPose> *vectorLqrPose)
+    int LocalPathPlanning(T_FreeSpaceImg tFreeSpaceImg, const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState,  bool needPath,vector<T_lqrPose> *vectorLqrPose)
     {
         clock_t time1 = clock();
         // std::cout << "Lidar info object num: " << std::endl;
+        // if (g_sFreeSpaceGray.empty() && tFreeSpaceImg.uiHeight > 0)
+        // {
+        //     g_sFreeSpaceGray.create(tFreeSpaceImg.uiHeight, tFreeSpaceImg.uiWidth, CV_8UC1);
+        // }
+
+        // CopyMatImg(tFreeSpaceImg, g_sFreeSpaceGray);
         resolution = 0.01;
         imageId++;
         bool shortPath = false; //用于判断剩余路径是不是过短，及时进行局部路径的重规划
@@ -1016,11 +1048,12 @@ int main()
         localIndex = 0; //用于记录上次局部规划轨迹与当前车辆的位置关系
         // find the path respecting point
         globalPathPoints.clear(); //将找到的中心点放到全局规划的参考路径中，注意，中心点的坐标y是从上到下
+        double totalLength = (image.rows-centerBeginPixel) * resolution;
         for(int i=0;i<centerPoints.size();i++)
         {
             Vec6d point;
             point[0] = centerPoints[i].position.x;
-            point[1] = abs(centerPoints[i].position.y-10);  //将中心点坐标改为从下到上
+            point[1] = abs(centerPoints[i].position.y-totalLength);  //将中心点坐标改为从下到上
             point[2] = centerPoints[i].heading;
             point[3] = centerPoints[i].curvature;
             point[4] = centerPoints[i].confidence;
@@ -1035,7 +1068,6 @@ int main()
             printf("To init state\n");
             init_state.x = tCarState.dX;
             init_state.y = tCarState.dY;
-            max_speed = normal_speed;
             updateFlag = false;
             isFirst = false;
         }
@@ -1192,7 +1224,7 @@ int main()
             //找到全局参考轨迹中与图像中心点最接近的点
             for (int i = index; i < pathPoints.size(); i++)
             {
-                double distance = sqrt(pow((pathPoints[0][0] - pathPoints[i][0]), 2) + pow((pathPoints[0][1] - pathPoints[i][1]), 2)) + 0.8;
+                double distance = sqrt(pow((pathPoints[0][0] - pathPoints[i][0]), 2) + pow((pathPoints[0][1] - pathPoints[i][1]), 2)) + centerBeginPixel*resolution/10;
                 // printf(i<<","<<pathPoints[i]<<"distance: "<<distance);
                 if (distance > centerLength)
                 {
@@ -1220,7 +1252,8 @@ int main()
             Point2d pixelpathPoint, endCentrPoint, endCentrPoint1, endCentrPoint2;
             //将全局坐标转换为图像的像素坐标位置
             pixelpathPoint.x = endpathPoint.y/ resolution;
-            pixelpathPoint.y = height - (endpathPoint.x+0.8) / resolution;
+            double a = centerBeginPixel*resolution/10;
+            pixelpathPoint.y = height - (endpathPoint.x+centerBeginPixel*resolution/10) / resolution;
             double minDis = 10000;
             double x = (height / 2 - pixelpathPoint.y) * resolution;
             double y = (width / 2 - pixelpathPoint.x) * resolution;
@@ -1373,18 +1406,18 @@ int main()
                     return iRet;
                 }
                 //轨迹平滑
-                reference_path_opt = path_optimizer.getReferencePath();
-                smoothed_reference_path.clear();
-                if (!PathOptimizationNS::isEqual(reference_path_opt.getLength(), 0.0))
-                {
-                    double s = 0.0;
-                    // std::cout<<reference_path_opt.getLength()<<std::endl;
-                    while (s < reference_path_opt.getLength())
-                    {
-                        smoothed_reference_path.emplace_back(reference_path_opt.getXS()(s), reference_path_opt.getYS()(s));
-                        s += 0.5;
-                    }
-                }
+                // reference_path_opt = path_optimizer.getReferencePath();
+                // smoothed_reference_path.clear();
+                // if (!PathOptimizationNS::isEqual(reference_path_opt.getLength(), 0.0))
+                // {
+                //     double s = 0.0;
+                //     // std::cout<<reference_path_opt.getLength()<<std::endl;
+                //     while (s < reference_path_opt.getLength())
+                //     {
+                //         smoothed_reference_path.emplace_back(reference_path_opt.getXS()(s), reference_path_opt.getYS()(s));
+                //         s += 0.5;
+                //     }
+                // }
                 // path_optimizer.printObstacleDistance2(smoothed_reference_path);
                 // printf("-------------------------------------------------------");
                 // path_optimizer.printObstacleDistance(result_path);
@@ -1518,6 +1551,7 @@ int main()
                 geneatePathPoint(smoothed_trajectory, &points);
                 SpeedData speed_data; 
                 std::vector<T_lqrPose> resultPose;
+                double cur_speed = tCarState.dV;
                 generateSpeed(Obs, points, cur_speed, max_speed, &speed_data,&resultPose);
                 for(int i=0;i<resultPose.size();i++)
                 {
@@ -1528,7 +1562,6 @@ int main()
             }
 
             // restore parameters
-            max_speed = normal_speed;
             updateFlag = true;
             if (iRet != PathPlan_LASTWRITE)
             {
@@ -1540,11 +1573,15 @@ int main()
         return iRet;
     }
 
-    void  generateSpeed(std::vector<T_Obs> j3Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data,vector<T_lqrPose> *resultPose)
+    int  generateSpeed(std::vector<T_Obs> j3Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data,vector<T_lqrPose> *resultPose)
     {
         LocalPathRefer.clear();
         PathOptimizationNS::State localRefer;
         std::cout << "generate speed: " << points.size() << std::endl;
+        if(points.size() < 1)
+        {
+            return 0;
+        }
         // create static obstacles
         STObstaclesProcessor st_obstacles_processor_;
         DiscretizedPath discretizedPath(points);
@@ -1621,7 +1658,7 @@ int main()
         std::cout << "begin search speed: " << std::endl;
         auto ret = dp_st_graph.Search(speed_data);
         std::cout << "begin process speed: " << std::endl;
-        if (total_length > 9 && ret)
+        if (total_length > 5 && ret)
         {
             ret = Process(discretizedPath, init_point_, speed_data, boundariesG, max_speed, total_length);
         }
@@ -1678,6 +1715,7 @@ int main()
             vectorLqrPoseTest.push_back(lqrpose);
             resultPose->push_back(lqrpose);
         }
+        return 1;
         // outFile2.close();
     }
 
@@ -1695,7 +1733,7 @@ int main()
             p.y() = resultPath[i].y;
             points.push_back(p);
         }
-        curve.fit(points, 0.01);
+        curve.fit(points, 0.1);
         // resample point
         vector<Point2f> result_path;
         for (Bezier<3, 2> b : curve.getPiecewiseBeziers())
@@ -1711,17 +1749,6 @@ int main()
         }
         result_path.erase(unique(result_path.begin(), result_path.end()), result_path.end());
         std::cout << "remove duplicate elements" << result_path.size() << std::endl;
-        if (max_speed > 1.2)
-        {
-            if (result_path.size() < 70)
-            {
-                max_speed = 1.2;
-            }
-            else if (result_path.size() < 102)
-            {
-                max_speed = 2.0;
-            }
-        }
         vector<double> curvitys = calculate_curvature_difference(result_path);
         cout << "Saving trajectory ..." << endl;
 
@@ -1757,11 +1784,6 @@ int main()
             point.kappa = curvitys[i];
             point.s = std::hypot(point.x, point.y);
             pointspath->push_back(point);
-            if (abs(curvitys[i]) > 0.08)
-            {
-                // std::cout << "max curvitys is larger than 0.1" << std::endl;
-                max_speed = 1.2;
-            }
         }
     }
 

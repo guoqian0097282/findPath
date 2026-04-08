@@ -16,6 +16,7 @@ typedef struct _CarState
     double dX;         // X position, 单位m
     double dY;         // Y position, 单位m
     double dTimeStamp; // timestamp
+    double dV;  //speed
 } T_CarState;
 
 typedef struct _Obs
