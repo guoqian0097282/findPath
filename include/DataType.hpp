@@ -33,12 +33,12 @@ typedef struct _Obs
 typedef enum _PathPlanAlgErrorType
 {
     PathPlan_NOCENTERPOINT = -9,    // can not find center point
-    PathPlan_TEMPFILE_EMPTY = -8,   // temp file is empty
+    PathPlan_NOGLOBALPATH = -8,   // 如果全局参考路径的参考点数量少于2个，直接返回规划失败
     PathPlan_INIT_FAILED = -7,      // init failed
     PathPlan_SYSTEM_NOT_READY = -6, // system is not ready
     PathPlan_NO_IMAGE_YET = -5,     // image is empty
     PathPlan_PARKING = -4,          // car state is empty
-    PathPlan_LASTWRITE = -3,        // false: no path generate; true: write path to temp txt file
+    PathPlan_SHORT = -3,        // false: the path generate is too short
     PathPlan_FAILED = -2,           // failed
     PathPlan_SUCCESS = -1,          // success
     PathPlan_OK = 0,

@@ -17,7 +17,9 @@ extern "C"
 
     // ##########################################################################################################
     int InitPathPlanning();
-    int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *Obs, T_CarState tCarState,bool needPath, IpcSignal_Road_Det_TrackType *pTrack); 
+    int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *Obs, T_CarState tCarState,bool needPath, IpcSignal_Road_Det_TrackType *pTrack);
+
+    int GetPathPlanAlgVersion(char pucAlgVersionArray[ARRAY_LEN]); 
 
 #ifdef __cplusplus
 };

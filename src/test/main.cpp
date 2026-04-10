@@ -116,7 +116,7 @@ extern "C"
     static void ColorTransformation(cv::Mat cvImgIn, cv::Mat &cvImgOut);
     static void geneatePathPoint(std::vector<PathOptimizationNS::State> result_path, std::vector<PathPoint> *points);
     static int generateSpeed(std::vector<T_Obs> Obs, std::vector<PathPoint> points, double cur_speed, double max_speed, SpeedData *speed_data,vector<T_lqrPose> *resultPose);
-    static int LocalPathPlanning(T_FreeSpaceImg tFreeSpaceImg, const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState, bool needPath, vector<T_lqrPose> *vectorLqrPose);
+    static int LocalPathPlanning(const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState, bool needPath, vector<T_lqrPose> *vectorLqrPose);
     // ##########################################################################################################
 
     // B样条基函数计算
@@ -806,7 +806,8 @@ int main()
         return -1;
     }
     // 生成测试序列
-    for(int i=100;i<500;i++)
+    auto total_start = std::chrono::high_resolution_clock::now();
+    for(int i=400;i<500;i++)
     {
         width = 1920;  //图像宽
         height = 1080; //图像高
@@ -828,12 +829,23 @@ int main()
         // 道路宽度最多是6米，所以对图像超出6米范围的区域进行不可通行区域的处理，方便寻找中心线
         image.colRange(width/2+300,width).setTo(0);
         image.colRange(0,width/2-300).setTo(0);
+        // set safe margin 
+        double safety_margin_pixel = 20;
+        cv::Mat obstacle_mask;
+        cv::bitwise_not(image,obstacle_mask);
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE,cv::Size(safety_margin_pixel*2+1,safety_margin_pixel*2+1));
+        cv::Mat dilated_obstacle;
+        cv::dilate(obstacle_mask,dilated_obstacle,kernel);
+        cv::Mat safe_free_space;
+        cv::bitwise_not(dilated_obstacle,safe_free_space);
+
         if(globalSequence.size() > max_size)
         {
             globalSequence.pop_front();
         }
-        globalSequence.push_back(image);
+        globalSequence.push_back(safe_free_space);
     }
+    
     std::cout << "  Generated " << globalSequence.size() << " frames" << std::endl;
     
     // 车辆位置（图像底部中央）
@@ -843,7 +855,6 @@ int main()
     
     // 设置车辆位置（自动同步到所有组件）
     manager->setVehiclePosition(vehicle_pos);
-    auto total_start = std::chrono::high_resolution_clock::now();
     
     for (int frame_id = 0; frame_id < globalSequence.size(); ++frame_id) {
         
@@ -870,9 +881,8 @@ int main()
         std::vector<T_Obs> Obs;
         //############################################begin path plan#########################
         vector<T_lqrPose> vectorLqrPose;
-        T_FreeSpaceImg tFreeSpaceImg;
         //进行局部路径规划
-        LocalPathPlanning(tFreeSpaceImg,globalSequence[frame_id], Obs, result.points, tCarState,true, &vectorLqrPose);
+        LocalPathPlanning(globalSequence[frame_id], Obs, result.points, tCarState,true, &vectorLqrPose);
         std::cout<<"vectorLqrPose size: "<<vectorLqrPose.size()<<std::endl;
         //clear the struct
         IpcSignal_Road_Det_TrackType *pTrack = (IpcSignal_Road_Det_TrackType*)malloc(sizeof(IpcSignal_Road_Det_TrackType));
@@ -903,8 +913,6 @@ int main()
         pTrack->s8RoadDirection = 1;
         pTrack->s8isRoadWide = 1;
         pTrack->u16RoadWidth = result.avg_width;
-
-
     }
     auto total_end = std::chrono::high_resolution_clock::now();
     double total_time = std::chrono::duration<double, std::milli>(total_end - total_start).count();
@@ -918,22 +926,15 @@ int main()
     return 0;
 }
     // 前视摄像头安装角度水平，鱼眼矫正后有0.7m盲区
-    int LocalPathPlanning(T_FreeSpaceImg tFreeSpaceImg, const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState,  bool needPath,vector<T_lqrPose> *vectorLqrPose)
+    int LocalPathPlanning(const cv::Mat& image, std::vector<T_Obs> Obs, const std::vector<CenterlinePoint>& centerPoints,T_CarState tCarState,  bool needPath,vector<T_lqrPose> *vectorLqrPose)
     {
         clock_t time1 = clock();
-        // std::cout << "Lidar info object num: " << std::endl;
-        // if (g_sFreeSpaceGray.empty() && tFreeSpaceImg.uiHeight > 0)
-        // {
-        //     g_sFreeSpaceGray.create(tFreeSpaceImg.uiHeight, tFreeSpaceImg.uiWidth, CV_8UC1);
-        // }
-
-        // CopyMatImg(tFreeSpaceImg, g_sFreeSpaceGray);
         resolution = 0.01;
         imageId++;
         bool shortPath = false; //用于判断剩余路径是不是过短，及时进行局部路径的重规划
         // draw map
         Mat new_map;
-        int index = 5; //参考路经的起点从第20个点开始
+        int index = 0; //参考路经的起点从第20个点开始
         localIndex = 0; //用于记录上次局部规划轨迹与当前车辆的位置关系
         // find the path respecting point
         globalPathPoints.clear(); //将找到的中心点放到全局规划的参考路径中，注意，中心点的坐标y是从上到下
@@ -948,7 +949,6 @@ int main()
             point[4] = centerPoints[i].confidence;
             point[5] = centerPoints[i].road_width;
             globalPathPoints.push_back(point);
-
         }
         //第一次轨迹规划，或者轨迹更新之后，进行初始车辆位置的刷新
         int iRet = PathPlan_OK;
@@ -1177,7 +1177,7 @@ int main()
                 {
                     endCentrPoint = pixelpathPoint;
                 }
-                else if (path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5)
+                else if ((path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5)|| path_dis > 2.0)
                 {
                     endCentrPoint = centerPointend;
                 }
@@ -1204,7 +1204,7 @@ int main()
                 {
                     endCentrPoint = pixelpathPoint;
                 }
-                else if (path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5)
+                else if ((path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5)|| path_dis > 2.0)
                 {
                     endCentrPoint = centerPoint[0];
                 }
@@ -1227,7 +1227,7 @@ int main()
             //将起点向上挪2米，不然车辆会检测到碰撞
             start_state.x = (-height / 2) * resolution;
             start_state.y = (width / 2 - (ori_width/2 - cropX)/10) * resolution;
-            // set end state 局部轨迹规划的终点做标
+            // set end state 局部轨迹规划的终点坐标
             end_state.x = endpixelPoint.x * resolution;
             end_state.y = endpixelPoint.y * resolution;
             // 找到全局参考轨迹上从起点到终点的参考点，要保证参数点数量大于6个
@@ -1275,7 +1275,7 @@ int main()
                     }
                 }
                 std::cout << "referDistancenum: " << referDistancenum << std::endl;
-                if(referDistancenum < 6)
+                if(referDistancenum <= 6)
                 {
                     std::cout<<"refer point is close to obstacle"<<std::endl;
                     iRet = PathPlan_FAILED;
@@ -1414,10 +1414,7 @@ int main()
 
             if (smoothed_trajectory.size() < 5)
             {
-                if (iRet != PathPlan_LASTWRITE)
-                {
-                    iRet = PathPlan_PARKING;
-                }
+                iRet = PathPlan_PARKING;
                 return iRet;
             }
             else
@@ -1433,7 +1430,7 @@ int main()
                     // std::cout << "reference_path_plot: " << x << "," << y << std::endl;
                     circle(img_src2, p, 3, cv::Scalar(0, 0, 0), -1);
                 }
-                cv::imwrite("map_plan.jpg", img_src2);
+                cv::imwrite("../result_image/"+to_string(imageId)+".jpg", img_src2);
                 cv::imshow("image", img_src2);
                 cv::waitKey(300);
                 std::vector<PathPoint> points;
@@ -1452,10 +1449,7 @@ int main()
 
             // restore parameters
             updateFlag = true;
-            if (iRet != PathPlan_LASTWRITE)
-            {
-                iRet = PathPlan_UPDATE;
-            }
+            iRet = PathPlan_UPDATE;
         }
         clock_t time2 = clock();
         cout << "LocalPathPlanning_time:" << double(time2 - time1) / 1000 << "ms" << std::endl;

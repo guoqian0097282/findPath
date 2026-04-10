@@ -80,7 +80,7 @@ extern "C"
         double a;
     } T_lqrPose;
 
-    #define LH_PATHPLANNING_ALG_VERSION ("LH-PAHTPLAN-V1.51") // pathplanning算法版本号
+    #define LH_PATHPLANNING_ALG_VERSION ("LH-PAHTPLAN-V1.1") // localpathplanning算法版本号
 
     static cv::Mat g_sFreeSpaceGray;      // 输入freespace, 只申请一次空间，避免频繁申请释放空间产生内存碎片
     static string g_sglobalPathName = ""; // global 路径名称
@@ -727,6 +727,13 @@ extern "C"
         return output;
     }
 
+    int GetPathPlanAlgVersion(char pucAlgVersionArray[ARRAY_LEN])
+    {
+
+        snprintf(pucAlgVersionArray, ARRAY_LEN, "%s", LH_PATHPLANNING_ALG_VERSION);
+        return PathPlan_OK;
+    }
+
     // Init 初始化函数
     int InitPathPlanning()
     {
@@ -787,7 +794,7 @@ extern "C"
         if (!manager->initialize(resolution, debug, max_history, false)) 
         {
             std::cerr << "Failed to initialize CenterlineManager!" << std::endl;
-            return -1;
+            return PathPlan_INIT_FAILED;
         }
         printf("InitPathPlanning, ----------end:");
         return PathPlan_OK;
@@ -800,8 +807,11 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
 {
     //先进行变量的初始化
     InitPathPlanning();
-    
-    if (g_sFreeSpaceGray.empty() && tFreeSpaceImg.uiHeight > 0)
+    if (NULL == tFreeSpaceImg.pucImg)
+    {
+        return PathPlan_NO_IMAGE_YET;
+    }
+    if (g_sFreeSpaceGray.empty())
     {
         g_sFreeSpaceGray.create(tFreeSpaceImg.uiHeight, tFreeSpaceImg.uiWidth, CV_8UC1);
     }
@@ -830,6 +840,15 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
     // 道路宽度最多是6米，所以对图像超出6米范围的区域进行不可通行区域的处理，方便寻找中心线
     image.colRange(width/2+300,width).setTo(0);
     image.colRange(0,width/2-300).setTo(0);
+
+    double safety_margin_pixel = 20;
+    cv::Mat obstacle_mask;
+    cv::bitwise_not(image,obstacle_mask);
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE,cv::Size(safety_margin_pixel*2+1,safety_margin_pixel*2+1));
+    cv::Mat dilated_obstacle;
+    cv::dilate(obstacle_mask,dilated_obstacle,kernel);
+    cv::Mat safe_free_space;
+    cv::bitwise_not(dilated_obstacle,safe_free_space);
         
     // 车辆位置（图像底部中央）
     cv::Point2d vehicle_pos(width / 2.0 * resolution, (height - centerBeginPixel) * resolution);
@@ -845,7 +864,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
     auto frame_start = std::chrono::high_resolution_clock::now();
     
     // 处理单帧
-    FrameData result = manager->processFrame(image, frame_id, frame_id * 0.033);
+    FrameData result = manager->processFrame(safe_free_space, frame_id, frame_id * 0.033);
         
     //############################################begin path plan#########################
     vector<T_lqrPose> vectorLqrPose;
@@ -859,7 +878,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
     }
     
     //进行局部路径规划
-    int ret = LocalPathPlanning(image, obsData, result.points, tCarState,true, &vectorLqrPose);
+    int ret = LocalPathPlanning(safe_free_space, obsData, result.points, tCarState,true, &vectorLqrPose);
     std::cout<<"vectorLqrPose size: "<<vectorLqrPose.size()<<std::endl;
     //clear the struct
     if(pTrack != NULL)
@@ -908,7 +927,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
         bool shortPath = false; //用于判断剩余路径是不是过短，及时进行局部路径的重规划
         // draw map
         Mat new_map;
-        int index = 5; //参考路经的起点从第20个点开始
+        int index = 0; //参考路经的起点从第20个点开始
         localIndex = 0; //用于记录上次局部规划轨迹与当前车辆的位置关系
         // find the path respecting point
         globalPathPoints.clear(); //将找到的中心点放到全局规划的参考路径中，注意，中心点的坐标y是从上到下
@@ -1058,7 +1077,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
             if(centerPoint.size() < 1)  //找不到中心点，前面不可通行或者中心点偏一边，不进行局部规划
             {
                 printf("centerPoint is empty:\n");
-                return PathPlan_FAILED;
+                return PathPlan_NOCENTERPOINT;
             }
             // Initialize grid map from image. 栅格地图的初始化
             grid_map::GridMap grid_map(std::vector<std::string>{"obstacle", "distance"});
@@ -1107,7 +1126,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
             //如果全局参考路径的参考点数量少于2个，直接返回规划失败
             if (endIndex - index < 2)
             {
-                iRet = PathPlan_FAILED;
+                iRet = PathPlan_NOGLOBALPATH;
                 return iRet;
             }
             // global to local
@@ -1150,7 +1169,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
                 {
                     endCentrPoint = pixelpathPoint;
                 }
-                else if (path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5)
+                else if ((path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5) || path_dis > 2.0)
                 {
                     endCentrPoint = centerPointend;
                 }
@@ -1177,7 +1196,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
                 {
                     endCentrPoint = pixelpathPoint;
                 }
-                else if (path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5)
+                else if ((path_dis < 2.0 && distY < 2.0 && poseCenDistance > 1.5)|| path_dis > 2.0)
                 {
                     endCentrPoint = centerPoint[0];
                 }
@@ -1251,7 +1270,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
                 if(referDistancenum < 6)
                 {
                     std::cout<<"refer point is close to obstacle"<<std::endl;
-                    iRet = PathPlan_FAILED;
+                    iRet = PathPlan_NOGLOBALPATH;
                     return  iRet;
                 }
                 // calcualte distance from obstacle
@@ -1387,10 +1406,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
 
             if (smoothed_trajectory.size() < 5)
             {
-                if (iRet != PathPlan_LASTWRITE)
-                {
-                    iRet = PathPlan_PARKING;
-                }
+                iRet = PathPlan_FAILED;
                 return iRet;
             }
             else
@@ -1406,9 +1422,9 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
                     // std::cout << "reference_path_plot: " << x << "," << y << std::endl;
                     circle(img_src2, p, 3, cv::Scalar(0, 0, 0), -1);
                 }
-                cv::imwrite("map_plan.jpg", img_src2);
-                cv::imshow("image", img_src2);
-                cv::waitKey(300);
+                // cv::imwrite("../result_image/"+to_string(frame_id)+".jpg", img_src2);
+                // cv::imshow("image", img_src2);
+                // cv::waitKey(300);
                 std::vector<PathPoint> points;
                 geneatePathPoint(smoothed_trajectory, &points);
                 SpeedData speed_data; 
@@ -1425,10 +1441,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
 
             // restore parameters
             updateFlag = true;
-            if (iRet != PathPlan_LASTWRITE)
-            {
-                iRet = PathPlan_UPDATE;
-            }
+            iRet = PathPlan_UPDATE;
         }
         clock_t time2 = clock();
         cout << "LocalPathPlanning_time:" << double(time2 - time1) / 1000 << "ms" << std::endl;
@@ -1442,7 +1455,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
         std::cout << "generate speed: " << points.size() << std::endl;
         if(points.size() < 1)
         {
-            return 0;
+            return PathPlan_SHORT;
         }
         // create static obstacles
         STObstaclesProcessor st_obstacles_processor_;
@@ -1577,7 +1590,7 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
             vectorLqrPoseTest.push_back(lqrpose);
             resultPose->push_back(lqrpose);
         }
-        return 1;
+        return PathPlan_OK;
         // outFile2.close();
     }
 
