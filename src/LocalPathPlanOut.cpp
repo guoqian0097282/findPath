@@ -819,10 +819,9 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
     CopyMatImg(tFreeSpaceImg, g_sFreeSpaceGray);
     cv::Mat image = g_sFreeSpaceGray;
     // 参数配置
-    int width = image.cols;  //图像宽
-    int height = image.rows; //图像高
-    int num_frames = 400;   //图像数量
-    double resolution = 0.01;  //图像分辨率
+    width = image.cols;  //图像宽
+    height = image.rows; //图像高
+    resolution = 0.01;  //图像分辨率
     frame_id++;
     
     //如果图像为空，直接返回规划失败
@@ -913,10 +912,8 @@ int LocalPathPlanOut(T_FreeSpaceImg tFreeSpaceImg, T_J3ObsData *J3ObsData, T_Car
     
     std::cout << "----------------------------------------" << std::endl;
     std::cout << "Processing completed!" << std::endl;
-    std::cout << "Total time: " << total_time / 1000.0 << " s" << std::endl;
-    std::cout << "Average per frame: " << total_time / num_frames << " ms" << std::endl;
-    std::cout << "FPS: " << 1000.0 / (total_time / num_frames) << std::endl;    
-    waitKey(0);
+    std::cout << "Total time: " << total_time / 1000.0 << " s" << std::endl;  
+    // waitKey(0);
     return ret;
 }
     // 前视摄像头安装角度水平，鱼眼矫正后有0.7m盲区

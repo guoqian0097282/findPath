@@ -55,7 +55,7 @@ include_directories(
 )
 
 add_library(
-        path_searcher SHARED
+        AFA_findpath SHARED
         src/LocalPathPlanOut.cpp
         src/centerline_extract.cpp
         src/tools/tools.cpp
@@ -122,7 +122,7 @@ add_library(
         src/speed/vec2d.cpp
         )
 
-        target_link_libraries(path_searcher 
+        target_link_libraries(AFA_findpath 
                 # ${OpenCV_LIBS} 
                 opencv_world # ${OpenCV_LIBS} 
                 # ${YAML_CPP_LIBRARIES}
@@ -135,10 +135,10 @@ add_library(
 
         add_executable(main
         src/test/main.cpp)
-        target_link_libraries(main  opencv_world Eigen3::Eigen gflags OsqpEigen::OsqpEigen osqp::osqp path_searcher)
+        target_link_libraries(main  opencv_world Eigen3::Eigen gflags OsqpEigen::OsqpEigen osqp::osqp AFA_findpath)
 # # new
 # 安装库文件
-install(TARGETS path_searcher
+install(TARGETS AFA_findpath
         LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
         ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
 
@@ -151,7 +151,7 @@ install(TARGETS main
 
 # 安装头文件（供其他项目使用 path_searcher）
 install(DIRECTORY include/
-DESTINATION ${CMAKE_INSTALL_PREFIX}/include/path_searcher
+DESTINATION ${CMAKE_INSTALL_PREFIX}/include/AFA_findpath
 FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
 
 # 安装第三方库头文件（如果不在系统标准路径中）

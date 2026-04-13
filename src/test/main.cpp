@@ -795,10 +795,9 @@ int main()
     InitPathPlanning();
     
     // 参数配置
-    int width = 1920;  //图像宽
-    int height = 1080; //图像高
-    int num_frames = 400;   //图像数量
-    double resolution = 0.01;  //图像分辨率
+    width = 1920;  //图像宽
+    height = 1080; //图像高
+    resolution = 0.01;  //图像分辨率
     bool debug = false;
     int max_history = 15;  //最大参考帧，用于时序平滑中心点的寻找
     if (!manager->initialize(resolution, debug, max_history, false)) {
@@ -807,7 +806,7 @@ int main()
     }
     // 生成测试序列
     auto total_start = std::chrono::high_resolution_clock::now();
-    for(int i=400;i<500;i++)
+    for(int i=100;i<500;i++)
     {
         width = 1920;  //图像宽
         height = 1080; //图像高
@@ -920,8 +919,6 @@ int main()
     std::cout << "----------------------------------------" << std::endl;
     std::cout << "Processing completed!" << std::endl;
     std::cout << "Total time: " << total_time / 1000.0 << " s" << std::endl;
-    std::cout << "Average per frame: " << total_time / num_frames << " ms" << std::endl;
-    std::cout << "FPS: " << 1000.0 / (total_time / num_frames) << std::endl;    
     waitKey(0);
     return 0;
 }

@@ -61,7 +61,7 @@ DEFINE_bool(constraint_end_heading, true, "add constraints on end heading");
 
 ///// Others.
 /////
-DEFINE_double(output_spacing, 0.1, "output interval");
+DEFINE_double(output_spacing, 0.2, "output interval");
 
 DEFINE_double(epsilon, 1e-6, "use this when comparing double");
 
