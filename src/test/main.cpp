@@ -786,6 +786,25 @@ extern "C"
         return PathPlan_OK;
     }
 
+std::vector<cv::Point2d> computeCenterLineFromEndPoint(cv::Point2d left_start,cv::Point2d left_end,cv::Point2d right_start,cv::Point2d right_end,int num_points)
+{
+    std::vector<cv::Point2d> centerLine;
+    for(int i=0;i<num_points;i++)
+    {
+        double t = (double) i/num_points;
+        double left_start_x = left_start.x + t*(left_end.x - left_start.x);
+        double left_start_y = left_start.y + t*(left_end.y - left_start.y);
+
+        double right_start_x = right_start.x + t*(right_end.x - right_start.x);
+        double right_start_y = right_start.y + t*(right_end.y - right_start.y);
+
+        cv::Point2d centerPoint;
+        centerPoint.x = (left_start_x + right_start_x)/2;
+        centerPoint.y = (left_start_y + right_start_y)/2;
+        centerLine.push_back(centerPoint);
+    }
+    return centerLine;
+}
 
 // ==================== 主函数 ====================
 
@@ -798,6 +817,16 @@ int main()
     width = 1920;  //图像宽
     height = 1080; //图像高
     resolution = 0.01;  //图像分辨率
+    // lane line
+    std::vector<cv::Point> lanePoints;
+    lanePoints.push_back(cv::Point(3,0));
+    lanePoints.push_back(cv::Point(4,10));
+    lanePoints.push_back(cv::Point(-2,0));
+    lanePoints.push_back(cv::Point(-1,10));
+    
+    std::vector<cv::Point2d> centerLine = computeCenterLineFromEndPoint(lanePoints[0],lanePoints[1],lanePoints[2],lanePoints[3],50);
+
+
     bool debug = false;
     int max_history = 15;  //最大参考帧，用于时序平滑中心点的寻找
     if (!manager->initialize(resolution, debug, max_history, false)) {
