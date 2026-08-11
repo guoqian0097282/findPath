@@ -1,0 +1,31 @@
+[project]
+name = "fwdper"
+version = "0.1.0"
+description = "FwdPer inference extension module"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Miao" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "numpy<2", # 指定 numpy 版本小于 2
+    "onnxruntime_gpu",
+    "opencv-python",
+    "matplotlib",
+    "pillow", # TODO 争取删掉
+    "scipy",
+    "torch",   # TODO 争取删掉
+    "ultralytics" # TODO 争取删掉
+]
+
+[tool.setuptools.packages.find]
+where = ["./build"]
+include = ["fwdper"]
+
+[tool.setuptools.package-data]
+"fwdper" = ["*.so", "*.pyd", "*.pyi", "assets/*", "test_data/*"]
