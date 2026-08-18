@@ -1,7 +1,3 @@
-#include <stdint.h>
-#include <string.h>
-#include <stdlib.h>
-
 /**
  * @brief CRC16-Modbus计算
  * @param buf: 待计算数据缓冲区
@@ -94,30 +90,12 @@ void ObjData_Pack(ObjBusinessData_t *src_data, ObjCanPacket_t *pkt_out)
 // CAN FD发送调用示例
 extern void CANFD_Send(uint32_t can_id, uint8_t *data, uint16_t len);
 
-void CAN_SendObjMsgs(uint32_t can_id, ObjBusinessData_t *send_data, uint8_t count)
-{
-    if (count == 0 || send_data == NULL) return;
-    uint16_t data_len = (uint16_t)(sizeof(ObjBusinessData_t) * count);
-    uint16_t total_len = data_len + sizeof(uint16_t);
-    uint8_t *buf = (uint8_t *)malloc(total_len);
-    if (!buf) return;
-
-    // 拷贝多条业务数据
-    memcpy(buf, send_data, data_len);
-    // 计算CRC并附在数据末尾（小端）
-    uint16_t crc = CRC16_Modbus_Fast(buf, data_len);
-    buf[data_len] = (uint8_t)(crc & 0xFF);
-    buf[data_len + 1] = (uint8_t)((crc >> 8) & 0xFF);
-
-    // 发送
-    CANFD_Send(can_id, buf, total_len);
-    free(buf);
-}
-
-// 向后兼容的单条发送接口，委托给批量接口
 void CAN_SendObjMsg(uint32_t can_id, ObjBusinessData_t *send_data)
 {
-    CAN_SendObjMsgs(can_id, send_data, 1);
+    ObjCanPacket_t tx_pkt;
+    ObjData_Pack(send_data, &tx_pkt);
+    // CAN FD一帧发送43字节完整数据包
+    CANFD_Send(can_id, (uint8_t *)&tx_pkt, PACK_TOTAL_LEN);
 }
 
 /**

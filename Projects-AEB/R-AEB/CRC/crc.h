@@ -35,8 +35,6 @@ extern "C" {
 
 // CAN 发送接口（在 CRC.cpp 中实现）
 void CAN_SendObjMsg(uint32_t can_id, ObjBusinessData_t *send_data);
-// 批量发送接口：一次发送多个ObjBusinessData_t
-void CAN_SendObjMsgs(uint32_t can_id, ObjBusinessData_t *send_data, uint8_t count);
 
 // Bridge: 从 VisPer RAEB 结果封装并发送 CAN 报文
 // can_id: 发送的 CAN 标识符
