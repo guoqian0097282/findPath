@@ -2,11 +2,11 @@
 #include <VisPer_c.h>
 #include <cstdint>
 #include <cmath>
-#include <algorithm>
+#include <vector>
 
 extern "C" {
 
-// 将 VisPer RAEB 结果映射为 ObjBusinessData_t 并发送
+// 将 VisPer RAEB 结果映射为 ObjBusinessData_t 并发送（批量）
 void ProcessRAEBAndSend(uint32_t can_id)
 {
     VisPerRaebResult_C res;
@@ -21,6 +21,9 @@ void ProcessRAEBAndSend(uint32_t can_id)
     if (res.track_info_rows < rows) rows = res.track_info_rows;
     if (res.tracked_cuboids_vel_rows < rows) rows = res.tracked_cuboids_vel_rows;
 
+    std::vector<ObjBusinessData_t> objs;
+    objs.reserve(rows);
+
     for (int i = 0; i < rows; ++i) {
         ObjBusinessData_t obj{};
 
@@ -28,7 +31,7 @@ void ProcessRAEBAndSend(uint32_t can_id)
         obj.Object_ID = static_cast<uint32_t>(res.track_info[i][0]);
 
         // Positions: tracked_cuboids [cx, cy, cz, l, w, h, conf, cls, theta_abs]
-        // scale positions by 100 to preserve two decimals (same as main.cpp example)
+        // scale positions by 100 to preserve two decimals
         float cx = res.tracked_cuboids[i][0];
         float cy = res.tracked_cuboids[i][1];
         obj.Object_Position_X = static_cast<int32_t>(std::round(cx * 100.0f));
@@ -83,8 +86,16 @@ void ProcessRAEBAndSend(uint32_t can_id)
         }
         obj.Object_Probability = prob;
 
-        // Pack and send
-        CAN_SendObjMsg(can_id, &obj);
+        objs.push_back(obj);
+    }
+
+    // 分批发送（每包最多255项以适配 uint8_t count）
+    size_t total = objs.size();
+    size_t offset = 0;
+    while (offset < total) {
+        uint8_t chunk = static_cast<uint8_t>(std::min<size_t>(255, total - offset));
+        CAN_SendObjMsgs(can_id, &objs[offset], chunk);
+        offset += chunk;
     }
 }
 
