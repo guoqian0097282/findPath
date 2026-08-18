@@ -1,3 +1,6 @@
+#include <stdint.h>
+#include <string.h>
+
 /**
  * @brief CRC16-Modbus计算
  * @param buf: 待计算数据缓冲区
