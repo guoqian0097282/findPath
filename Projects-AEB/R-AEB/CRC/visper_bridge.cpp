@@ -3,6 +3,44 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <random>
+
+namespace {
+
+float RandomAround(float center, float delta) {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(-delta, delta);
+    return center + dist(gen);
+}
+
+void FillDimensionByClass(float cls, float& width, float& length) {
+    const float original_width = width;
+    const float original_length = length;
+
+    if (cls == 0.0f) {
+        // person: use the original VisPer dimension as the center and jitter ±0.2
+        width = RandomAround(original_width, 0.2f);
+        length = RandomAround(original_length, 0.2f);
+    } else if (cls == 1.0f) {
+        // bicycle: use the original VisPer dimension as the center and jitter ±0.2
+        width = RandomAround(original_width, 0.2f);
+        length = RandomAround(original_length, 0.2f);
+    } else if (cls == 2.0f) {
+        // vehicle: use the original VisPer dimension as the center and jitter ±0.5,
+        // while keeping minimum legal size constraints.
+        width = RandomAround(original_width, 0.5f);
+        length = RandomAround(original_length, 0.5f);
+        width = std::max(width, 1.7f);
+        length = std::max(length, 4.6f);
+    } else {
+        // keep the values from VisPer if class is not 0/1/2
+        width = std::max(width, 0.0f);
+        length = std::max(length, 0.0f);
+    }
+}
+
+} // namespace
 
 extern "C" {
 
@@ -48,14 +86,17 @@ void ProcessRAEBAndSend(uint32_t can_id)
         float heading_deg = theta * 180.0f / static_cast<float>(M_PI);
         obj.Object_Heading = static_cast<int32_t>(std::round(heading_deg * 100.0f));
 
-        // Width and Length: tracked_cuboids: l (idx3), w (idx4)
+        // Class and confidence
+        float cls = res.tracked_cuboids[i][7];
+
+        // Width and Length: use class-based random size ranges.
+        // class 0=person, 1=bicycle, 2=vehicle
         float length = res.tracked_cuboids[i][3];
         float width = res.tracked_cuboids[i][4];
+        FillDimensionByClass(cls, width, length);
         obj.Object_Width = static_cast<int32_t>(std::round(width * 100.0f));
         obj.Object_Length = static_cast<int32_t>(std::round(length * 100.0f));
 
-        // Class and confidence
-        float cls = res.tracked_cuboids[i][7];
         float conf = res.tracked_cuboids[i][6];
         obj.Object_Class = static_cast<uint8_t>(std::round(cls));
         obj.Object_Confidence = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(conf * 100.0f)), 0, 100));

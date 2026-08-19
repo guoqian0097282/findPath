@@ -71,33 +71,33 @@ SCALE_1 = 1  # 控制输入鱼眼图尺寸
 # 平移字段统一存米：原始 Rt 的平移是厘米，这里的 world_x/world_y/world_z
 # 和 t_act 都是原始厘米值 / 100，后续圆柱外参生成逻辑不再额外换算。
 CALIB: dict[str, Any] = {
-    "world_x": 3.7303263,
-    "world_y": 0.0052569,
-    "world_z": 0.82389717,
+    "world_x": 3.7748573601,
+    "world_y": -0.0152094994,
+    "world_z": 0.8404738781,
 
-    "yaw": 1.47550833225,
-    "pitch": 31.56802558898,
-    "roll": 0.23961384594,
+    "yaw": 2.0150527128,
+    "pitch": 30.7180264408,
+    "roll": 0.6735314907,
     "angle_type": "degree",
 
     "image_width": 1280,
     "image_height": 960,
-    "focal_u": 316 / SCALE_1,
-    "focal_v": 316 / SCALE_1,
+    "focal_u": 316.7 / SCALE_1,
+    "focal_v": 316.7 / SCALE_1,
     "center_u": 640.0 / SCALE_1,
     "center_v": 480.0 / SCALE_1,
-    "fisheye_distort": [1.29134998e-01, -4.47760001e-02, 1.54010002e-02, -2.65199994e-03],
+    "fisheye_distort": [1.18387997e-01, -3.26739997e-02, 1.05250003e-02, -2.05200003e-03],
 
     "R_act": [
-    [0.85049957 ,   0.022687882,  -0.52548623 ],
-    [-0.016541021 ,  0.9997288  ,   0.016391674],
-    [0.52571559 ,  -0.0052490332,  0.85064417 ],
+    [0.85916001,   0.030228524, -0.51081342 ],
+    [-0.029158691,  0.9995237 ,   0.010105736],
+    [0.51087558 ,  0.006212207 , 0.85963219 ],
 ],
 
     "t_act" : [
-        -2.7800623 ,
-        0.05158205,
-        -2.690246,
+        -2.8134213 ,
+        0.11677855,
+        -2.6508865,
     ]
 
 }
@@ -780,35 +780,35 @@ if __name__ == "__main__":
 
     u, v = load_map_uv(bin_path, cyl_size[0], cyl_size[1])
 
-    # import glob
-    # import os
-    # # 方法1：使用 glob 匹配
-    # image_folder = "/home/gq/guoqian/Projects-AEB/testImage/images/"
-    # image_paths = glob.glob(os.path.join(image_folder, "*.jpg"))
+    import glob
+    import os
+    # 方法1：使用 glob 匹配
+    image_folder = "/home/gq/guoqian/Projects-AEB/R-AEB/python/undis/images_front"
+    image_paths = glob.glob(os.path.join(image_folder, "*.jpg"))
 
-    # # 读取所有图片
-    # images = []
-    # for path in image_paths:
-    #     fish = cv2.imread(path, cv2.IMREAD_COLOR)
-    #     fish = cv2.resize(
-    #         fish,
-    #         (int(1280 // SCALE_1), int(960 // SCALE_1)),
-    #         interpolation=cv2.INTER_LINEAR,
-    #         )
+    # 读取所有图片
+    images = []
+    for path in image_paths:
+        fish = cv2.imread(path, cv2.IMREAD_COLOR)
+        fish = cv2.resize(
+            fish,
+            (int(1280 // SCALE_1), int(960 // SCALE_1)),
+            interpolation=cv2.INTER_LINEAR,
+            )
 
-    #     remap, valid = apply_map(fish, u, v)
-    #     cv2.imwrite(f"./out/{os.path.basename(path)}", remap)
+        remap, valid = apply_map(fish, u, v)
+        cv2.imwrite(f"./out/{os.path.basename(path)}", remap)
 
 
-    img_path = "front.jpg"
-    fish = cv2.imread(f"/home/gq/guoqian/Projects-AEB/112/{img_path}", cv2.IMREAD_COLOR)
-    fish = cv2.resize(
-        fish,
-        (int(1280 // SCALE_1), int(960 // SCALE_1)),
-        interpolation=cv2.INTER_LINEAR,
-    )
+    # img_path = "idx0__yuv420_0.jpg"
+    # fish = cv2.imread(f"/home/gq/guoqian/Projects-AEB/M112/front/{img_path}", cv2.IMREAD_COLOR)
+    # fish = cv2.resize(
+    #     fish,
+    #     (int(1280 // SCALE_1), int(960 // SCALE_1)),
+    #     interpolation=cv2.INTER_LINEAR,
+    # )
 
-    remap, valid = apply_map(fish, u, v)
-    cv2.imwrite(f"./out/{img_path}", remap)
+    # remap, valid = apply_map(fish, u, v)
+    # cv2.imwrite(f"./out/{img_path}", remap)
 
-    print(f"fish_size:{fish_size}, cyl_size:{cyl_size}")
+    # print(f"fish_size:{fish_size}, cyl_size:{cyl_size}")

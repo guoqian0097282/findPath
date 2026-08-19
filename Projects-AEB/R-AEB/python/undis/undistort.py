@@ -7,6 +7,11 @@ import numpy as np
 import cv2
 
 SCALE_1 = 1  # 控制输入鱼眼图尺寸
+# 裁剪参数（针对原始 1920 宽图裁剪到 1600）：左裁 120，右裁 200
+CROP_LEFT = 100
+CROP_RIGHT = 100
+CROP_TOP = 0
+CROP_BOTTOM = 0
 
 # -------------------- 常量 --------------------
 # CALIB: dict[str, Any] = {
@@ -71,13 +76,13 @@ SCALE_1 = 1  # 控制输入鱼眼图尺寸
 # 平移字段统一存米：原始 Rt 的平移是厘米，这里的 world_x/world_y/world_z
 # 和 t_act 都是原始厘米值 / 100，后续圆柱外参生成逻辑不再额外换算。
 CALIB: dict[str, Any] = {
-    "world_x": -0.9501031687,
-    "world_y": 0.1260891959,
-    "world_z": 1.1988433305,
+    "world_x": 3.7748573601,
+    "world_y": -0.0152094994,
+    "world_z": 0.8404738781,
 
-    "yaw": -179.3464253645,
-    "pitch": 30.0303493435,
-    "roll": 3.3517856861,
+    "yaw": 2.0150527128,
+    "pitch": 30.7180264408,
+    "roll": 0.6735314907,
     "angle_type": "degree",
 
     "image_width": 1280,
@@ -89,17 +94,16 @@ CALIB: dict[str, Any] = {
     "fisheye_distort": [1.18387997e-01, -3.26739997e-02, 1.05250003e-02, -2.05200003e-03],
 
     "R_act": [
-    [-0.86570412,   -0.0098755406, -0.50045866],
-    [-0.01787081,   -0.99855822,    0.05061784],
-    [-0.50023699,    0.052763671,   0.86427945],
-],
+    [0.85916001,   0.030228524, -0.51081342 ],
+    [-0.029158691,  0.9995237 ,   0.010105736],
+    [0.51087558 ,  0.006212207 , 0.85963219 ],
+    ],
 
     "t_act" : [
-        -0.22129147 ,
-        0.04824543,
-        -1.5180653,
+        -2.8134213 ,
+        0.11677855,
+        -2.6508865,
     ]
-
 }
 
 SCALE_2: float = 0.75 * SCALE_1  # 控制输出圆柱图尺寸
@@ -169,6 +173,32 @@ def _camera_to_base_rz_ry_rx() -> np.ndarray:
     pitch = _calib_angle_rad("pitch")
     yaw = _calib_angle_rad("yaw")
     return _rot_z(yaw) @ _rot_y(pitch) @ _rot_x(roll)
+
+
+def _get_cropped_src():
+    """Return cropped source image params and adjusted principal point.
+
+    Returns dict with keys: Wf_full, Hf_full, Wf, Hf, cu0, cv0, left, top
+    """
+    Wf_full = int(CALIB["image_width"])
+    Hf_full = int(CALIB["image_height"])
+    left = int(CROP_LEFT); right = int(CROP_RIGHT); top = int(CROP_TOP); bottom = int(CROP_BOTTOM)
+    Wf = Wf_full - left - right
+    Hf = Hf_full - top - bottom
+    if Wf <= 0 or Hf <= 0:
+        raise ValueError("invalid crop parameters result in non-positive dimensions")
+    cu0 = float(CALIB["center_u"]) - left
+    cv0 = float(CALIB["center_v"]) - top
+    return {
+        "Wf_full": Wf_full,
+        "Hf_full": Hf_full,
+        "Wf": Wf,
+        "Hf": Hf,
+        "cu0": cu0,
+        "cv0": cv0,
+        "left": left,
+        "top": top,
+    }
 
 
 def _build_map_uv_float(
@@ -299,9 +329,11 @@ def build_map_fish_to_cyl() -> tuple[np.ndarray, np.ndarray, tuple[int, int], tu
       src_wh: (Wf_full, Hf_full)
       dst_wh: (Wc, Hc)
     """
-    Wf_full, Hf_full = int(CALIB["image_width"]), int(CALIB["image_height"])
+    params = _get_cropped_src()
+    Wf_full, Hf_full = params["Wf_full"], params["Hf_full"]
+    Wf_crop, Hf_crop = params["Wf"], params["Hf"]
     fu0, fv0 = float(CALIB["focal_u"]), float(CALIB["focal_v"])
-    cu0, cv0 = float(CALIB["center_u"]), float(CALIB["center_v"])
+    cu0, cv0 = params["cu0"], params["cv0"]
     k1, k2, k3, k4 = [float(x) for x in CALIB["fisheye_distort"]]
     pitch = math.radians(float(CALIB["pitch"]))
     roll = math.radians(float(CALIB["roll"]))
@@ -354,11 +386,11 @@ def build_map_fish_to_cyl() -> tuple[np.ndarray, np.ndarray, tuple[int, int], tu
     map_uv, mask, dst_wh = _build_map_uv_float(
         u_full,
         v_full,
-        W_src=Wf_full,
-        H_src=Hf_full,
+        W_src=Wf_crop,
+        H_src=Hf_crop,
         invalid=invalid,
     )
-    return map_uv, mask, (Wf_full, Hf_full), dst_wh
+    return map_uv, mask, (Wf_crop, Hf_crop), dst_wh
 
 
 def build_map_fish_to_base_cyl() -> tuple[np.ndarray, np.ndarray, tuple[int, int], tuple[int, int]]:
@@ -373,9 +405,11 @@ def build_map_fish_to_base_cyl() -> tuple[np.ndarray, np.ndarray, tuple[int, int
     The output cylinder frame is base_link:
       base X: forward, Y: left, Z: up
     """
-    Wf_full, Hf_full = int(CALIB["image_width"]), int(CALIB["image_height"])
+    params = _get_cropped_src()
+    Wf_full, Hf_full = params["Wf_full"], params["Hf_full"]
+    Wf_crop, Hf_crop = params["Wf"], params["Hf"]
     fu0, fv0 = float(CALIB["focal_u"]), float(CALIB["focal_v"])
-    cu0, cv0 = float(CALIB["center_u"]), float(CALIB["center_v"])
+    cu0, cv0 = params["cu0"], params["cv0"]
     k1, k2, k3, k4 = [float(x) for x in CALIB["fisheye_distort"]]
 
     f_cyl = fu0 * SCALE_2
@@ -422,11 +456,11 @@ def build_map_fish_to_base_cyl() -> tuple[np.ndarray, np.ndarray, tuple[int, int
     map_uv, mask, dst_wh = _build_map_uv_float(
         u_full,
         v_full,
-        W_src=Wf_full,
-        H_src=Hf_full,
+        W_src=Wf_crop,
+        H_src=Hf_crop,
         invalid=invalid,
     )
-    return map_uv, mask, (Wf_full, Hf_full), dst_wh
+    return map_uv, mask, (Wf_crop, Hf_crop), dst_wh
 
 
 # -------------------- 圆柱 -> 鱼眼（先小图映射，再缩放 map 到 full） --------------------
@@ -438,12 +472,14 @@ def build_map_cyl_to_fish() -> tuple[np.ndarray, np.ndarray, tuple[int, int], tu
       src_wh: (Wc, Hc)
       dst_wh: (Wf_full, Hf_full)
     """
-    Wf_full, Hf_full = int(CALIB["image_width"]), int(CALIB["image_height"])
-    Wf_s = int(round(Wf_full * SCALE_2))
-    Hf_s = int(round(Hf_full * SCALE_2))
+    params = _get_cropped_src()
+    Wf_full, Hf_full = params["Wf_full"], params["Hf_full"]
+    Wf_crop, Hf_crop = params["Wf"], params["Hf"]
+    Wf_s = int(round(Wf_crop * SCALE_2))
+    Hf_s = int(round(Hf_crop * SCALE_2))
 
     fu0, fv0 = float(CALIB["focal_u"]), float(CALIB["focal_v"])
-    cu0, cv0 = float(CALIB["center_u"]), float(CALIB["center_v"])
+    cu0, cv0 = params["cu0"], params["cv0"]
     k1, k2, k3, k4 = [float(x) for x in CALIB["fisheye_distort"]]
     pitch = math.radians(float(CALIB["pitch"]))
     roll = math.radians(float(CALIB["roll"]))
@@ -524,17 +560,17 @@ def build_map_cyl_to_fish() -> tuple[np.ndarray, np.ndarray, tuple[int, int], tu
 
     map_uv_full = cv2.resize(
         map_uv_s,
-        (Wf_full, Hf_full),
+        (Wf_crop, Hf_crop),
         interpolation=cv2.INTER_LINEAR,
     ).astype(np.float32)
 
     mask_full = cv2.resize(
         mask_s,
-        (Wf_full, Hf_full),
+        (Wf_crop, Hf_crop),
         interpolation=cv2.INTER_NEAREST,
     ).astype(np.float32)
 
-    return map_uv_full, mask_full, (Wc, Hc), (Wf_full, Hf_full)
+    return map_uv_full, mask_full, (Wc, Hc), (Wf_crop, Hf_crop)
 
 
 def save_map_uv(
@@ -679,9 +715,11 @@ def save_mesh_txt_fish_to_cyl_matlab(
     W_dst, H_dst = dst_wh
     step = 1 << int(m)
 
-    Wf_full, Hf_full = int(CALIB["image_width"]), int(CALIB["image_height"])
+    params = _get_cropped_src()
+    Wf_full, Hf_full = params["Wf_full"], params["Hf_full"]
+    Wf_crop, Hf_crop = params["Wf"], params["Hf"]
     fu0, fv0 = float(CALIB["focal_u"]), float(CALIB["focal_v"])
-    cu0, cv0 = float(CALIB["center_u"]), float(CALIB["center_v"])
+    cu0, cv0 = params["cu0"], params["cv0"]
     k1, k2, k3, k4 = [float(x) for x in CALIB["fisheye_distort"]]
 
     pitch = math.radians(float(CALIB["pitch"]))
@@ -766,7 +804,7 @@ def save_mesh_txt_fish_to_cyl_matlab(
 
     return txt_path
 
-
+import os
 if __name__ == "__main__":
     print_cyl_calib()
 
@@ -780,35 +818,54 @@ if __name__ == "__main__":
 
     u, v = load_map_uv(bin_path, cyl_size[0], cyl_size[1])
 
-    import glob
-    import os
-    # 方法1：使用 glob 匹配
-    image_folder = "/home/gq/guoqian/Projects-AEB/R-AEB/python/undis/images_rear"
-    image_paths = glob.glob(os.path.join(image_folder, "*.jpg"))
+    # import glob
+    # import os
+    # # 方法1：使用 glob 匹配
+    # image_folder = "/home/gq/guoqian/Projects-AEB/testImage/images/"
+    # image_paths = glob.glob(os.path.join(image_folder, "*.jpg"))
 
-    # 读取所有图片
-    images = []
-    for path in image_paths:
-        fish = cv2.imread(path, cv2.IMREAD_COLOR)
-        fish = cv2.resize(
-            fish,
-            (int(1280 // SCALE_1), int(960 // SCALE_1)),
-            interpolation=cv2.INTER_LINEAR,
-            )
+    # # 读取所有图片
+    # images = []
+    # for path in image_paths:
+    #     fish = cv2.imread(path, cv2.IMREAD_COLOR)
+    #     fish = cv2.resize(
+    #         fish,
+    #         (int(1280 // SCALE_1), int(960 // SCALE_1)),
+    #         interpolation=cv2.INTER_LINEAR,
+    #         )
 
-        remap, valid = apply_map(fish, u, v)
-        cv2.imwrite(f"./out/{os.path.basename(path)}", remap)
+    #     remap, valid = apply_map(fish, u, v)
+    #     cv2.imwrite(f"./out/{os.path.basename(path)}", remap)
 
 
-    # img_path = "idx0__yuv420_2.jpg"
-    # fish = cv2.imread(f"/home/gq/guoqian/Projects-AEB/M112/rear/{img_path}", cv2.IMREAD_COLOR)
-    # fish = cv2.resize(
-    #     fish,
-    #     (int(1280 // SCALE_1), int(960 // SCALE_1)),
-    #     interpolation=cv2.INTER_LINEAR,
-    # )
+    img_path = "frame_0000000000000000.jpg"
+    img_full_path = f"/home/gq/guoqian/Projects-AEB/R-AEB/python/undis/images_front/{img_path}"
+    fish = cv2.imread(img_full_path, cv2.IMREAD_COLOR)
+    if fish is None:
+        print(f"failed to load image: {img_full_path}")
+    else:
+        params = _get_cropped_src()
+        left, top = params["left"], params["top"]
+        Wf_crop, Hf_crop = params["Wf"], params["Hf"]
+        h_src, w_src = fish.shape[:2]
 
-    # remap, valid = apply_map(fish, u, v)
-    # cv2.imwrite(f"./out/{img_path}", remap)
+        # If image equals full expected size, crop; if equals cropped size, keep; otherwise try best-effort
+        if (w_src == params["Wf_full"] and h_src == params["Hf_full"]):
+            fish_cropped = fish[top: top + Hf_crop, left: left + Wf_crop]
+        elif (w_src == Wf_crop and h_src == Hf_crop):
+            fish_cropped = fish
+        else:
+            # try resizing to full expected then crop
+            try:
+                fish_rs = cv2.resize(fish, (params["Wf_full"], params["Hf_full"]), interpolation=cv2.INTER_LINEAR)
+                fish_cropped = fish_rs[top: top + Hf_crop, left: left + Wf_crop]
+                print(f"resized input from {w_src}x{h_src} to {params['Wf_full']}x{params['Hf_full']} then cropped")
+            except Exception as e:
+                print(f"unexpected image size {w_src}x{h_src}, cannot crop/resize: {e}")
+                fish_cropped = fish
 
-    # print(f"fish_size:{fish_size}, cyl_size:{cyl_size}")
+        os.makedirs("out", exist_ok=True)
+        remap, valid = apply_map(fish_cropped, u, v)
+        cv2.imwrite(f"./out/{img_path}", remap)
+
+    print(f"fish_size:{fish_size}, cyl_size:{cyl_size}")
