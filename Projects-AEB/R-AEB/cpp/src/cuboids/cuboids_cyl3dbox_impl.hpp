@@ -545,6 +545,1020 @@ public:
         return cuboids;
     }
 
+    // objs: (N,7) [x1,y1,x2,y2,conf,cls,theta_rel]
+    // points3d: (N,16) [p0.x,p0.y,...,p7.x,p7.y], CV_32F/CV_64F,
+    //           or (N,8) with 2 channels (CV_32FC2/CV_64FC2).
+    // p0..p3 are bottom corners (front-left, front-right, rear-right,
+    // rear-left); p4..p7 are their corresponding top corners.
+    // Returns the same (N,9) cuboid format as cuboids_from_boxes.
+    cv::Mat cuboids_from_boxesAnd3D(const cv::Mat& objs,
+                                    const cv::Mat& points3d,
+                                    double z_world,
+                                    const cv::Mat& masks) const {
+        CV_Assert(objs.empty() || (objs.type() == CV_32F && objs.cols == 7));
+        CV_Assert(points3d.empty() ||
+                  (points3d.channels() == 1 &&
+                   (points3d.cols == 18) &&
+                   (points3d.type() == CV_32F || points3d.type() == CV_64F)));
+
+        const int n2d = objs.rows;
+        const int n3d = points3d.rows;
+        if (n2d == 0 && n3d == 0) {
+            return cv::Mat(0, 9, CV_32F);
+        }
+        if (n3d == 0) {
+            return cuboids_from_boxes(objs, z_world, masks);
+        }
+        if (n2d == 0) {
+            cv::Mat synthetic_objs(n3d, 7, CV_32F, cv::Scalar(0));
+            cv::Mat point16(n3d, 16, CV_32F);
+            for (int i = 0; i < n3d; ++i) {
+                double min_u = std::numeric_limits<double>::infinity();
+                double max_u = -std::numeric_limits<double>::infinity();
+                double min_v = std::numeric_limits<double>::infinity();
+                double max_v = -std::numeric_limits<double>::infinity();
+                for (int k = 0; k < 16; k += 2) {
+                    const double u = points3d.type() == CV_32F
+                        ? points3d.at<float>(i, k)
+                        : points3d.at<double>(i, k);
+                    const double v = points3d.type() == CV_32F
+                        ? points3d.at<float>(i, k + 1)
+                        : points3d.at<double>(i, k + 1);
+                    point16.at<float>(i, k) = static_cast<float>(u);
+                    point16.at<float>(i, k + 1) = static_cast<float>(v);
+                    min_u = std::min(min_u, u);
+                    max_u = std::max(max_u, u);
+                    min_v = std::min(min_v, v);
+                    max_v = std::max(max_v, v);
+                }
+                synthetic_objs.at<float>(i, 0) = static_cast<float>(min_u);
+                synthetic_objs.at<float>(i, 1) = static_cast<float>(min_v);
+                synthetic_objs.at<float>(i, 2) = static_cast<float>(max_u);
+                synthetic_objs.at<float>(i, 3) = static_cast<float>(max_v);
+                synthetic_objs.at<float>(i, 4) = points3d.type() == CV_32F
+                    ? points3d.at<float>(i, 16)
+                    : static_cast<float>(points3d.at<double>(i, 16));
+                synthetic_objs.at<float>(i, 5) = points3d.type() == CV_32F
+                    ? points3d.at<float>(i, 17)
+                    : static_cast<float>(points3d.at<double>(i, 17));
+            }
+            return cuboids_from_boxesAnd3DAligned(
+                synthetic_objs, point16, z_world, cv::Mat());
+        }
+
+        cv::Mat point16(n3d, 16, CV_32F);
+        std::vector<cv::Rect2d> boxes3d(n3d);
+        std::vector<int> classes3d(n3d);
+        std::vector<double> confs3d(n3d);
+        for (int i = 0; i < n3d; ++i) {
+            double min_u = std::numeric_limits<double>::infinity();
+            double max_u = -std::numeric_limits<double>::infinity();
+            double min_v = std::numeric_limits<double>::infinity();
+            double max_v = -std::numeric_limits<double>::infinity();
+            for (int k = 0; k < 16; k += 2) {
+                const double u = points3d.type() == CV_32F
+                    ? points3d.at<float>(i, k)
+                    : points3d.at<double>(i, k);
+                const double v = points3d.type() == CV_32F
+                    ? points3d.at<float>(i, k + 1)
+                    : points3d.at<double>(i, k + 1);
+                point16.at<float>(i, k) = static_cast<float>(u);
+                point16.at<float>(i, k + 1) = static_cast<float>(v);
+                min_u = std::min(min_u, u);
+                max_u = std::max(max_u, u);
+                min_v = std::min(min_v, v);
+                max_v = std::max(max_v, v);
+            }
+            boxes3d[i] = cv::Rect2d(min_u, min_v, max_u - min_u, max_v - min_v);
+            confs3d[i] = points3d.type() == CV_32F
+                ? points3d.at<float>(i, 16)
+                : points3d.at<double>(i, 16);
+            classes3d[i] = static_cast<int>(std::llround(
+                points3d.type() == CV_32F
+                    ? points3d.at<float>(i, 17)
+                    : points3d.at<double>(i, 17)));
+        }
+
+        auto iou = [](const cv::Rect2d& a, const cv::Rect2d& b) {
+            const cv::Rect2d inter = a & b;
+            const double inter_area = inter.area();
+            const double union_area = a.area() + b.area() - inter_area;
+            return union_area > 1e-9 ? inter_area / union_area : 0.0;
+        };
+
+        std::vector<int> match2d(n2d, -1);
+        std::vector<bool> used3d(n3d, false);
+        for (int i = 0; i < n2d; ++i) {
+            const cv::Rect2d box2d(
+                objs.at<float>(i, 0), objs.at<float>(i, 1),
+                objs.at<float>(i, 2) - objs.at<float>(i, 0),
+                objs.at<float>(i, 3) - objs.at<float>(i, 1));
+            const int cls2d = static_cast<int>(
+                std::llround(objs.at<float>(i, 5)));
+            double best_iou = 0.70;
+            int best_j = -1;
+            for (int j = 0; j < n3d; ++j) {
+                if (used3d[j] || classes3d[j] != cls2d) continue;
+                const double overlap = iou(box2d, boxes3d[j]);
+                if (overlap >= best_iou) {
+                    best_iou = overlap;
+                    best_j = j;
+                }
+            }
+            if (best_j >= 0) {
+                match2d[i] = best_j;
+                used3d[best_j] = true;
+            }
+        }
+
+        auto single_mask = [&](int row) {
+            if (masks.empty()) return cv::Mat();
+            CV_Assert(masks.dims == 3 && masks.type() == CV_8U);
+            int sizes[3] = {1, masks.size[1], masks.size[2]};
+            cv::Mat result(3, sizes, CV_8U);
+            cv::Mat src(masks.size[1], masks.size[2], CV_8U,
+                        const_cast<uchar*>(masks.ptr<uchar>(row)),
+                        masks.step[1]);
+            cv::Mat dst(masks.size[1], masks.size[2], CV_8U,
+                        result.ptr<uchar>(0), result.step[1]);
+            src.copyTo(dst);
+            return result;
+        };
+
+        std::vector<cv::Mat> result_rows;
+        for (int i = 0; i < n2d; ++i) {
+            cv::Mat obj_row = objs.row(i).clone();
+            cv::Mat result;
+            if (match2d[i] >= 0) {
+                result = cuboids_from_boxesAnd3DAligned(
+                    obj_row, point16.row(match2d[i]).clone(), z_world,
+                    single_mask(i));
+            } else {
+                result = cuboids_from_boxes(
+                    obj_row, z_world, single_mask(i));
+            }
+            result_rows.push_back(result);
+        }
+        for (int j = 0; j < n3d; ++j) {
+            if (used3d[j]) continue;
+            cv::Mat synthetic_obj(1, 7, CV_32F, cv::Scalar(0));
+            synthetic_obj.at<float>(0, 0) = static_cast<float>(boxes3d[j].x);
+            synthetic_obj.at<float>(0, 1) = static_cast<float>(boxes3d[j].y);
+            synthetic_obj.at<float>(0, 2) = static_cast<float>(
+                boxes3d[j].x + boxes3d[j].width);
+            synthetic_obj.at<float>(0, 3) = static_cast<float>(
+                boxes3d[j].y + boxes3d[j].height);
+            synthetic_obj.at<float>(0, 4) = static_cast<float>(confs3d[j]);
+            synthetic_obj.at<float>(0, 5) = static_cast<float>(classes3d[j]);
+            result_rows.push_back(cuboids_from_boxesAnd3DAligned(
+                synthetic_obj, point16.row(j).clone(), z_world, cv::Mat()));
+        }
+
+        cv::Mat output(static_cast<int>(result_rows.size()), 9, CV_32F);
+        for (int i = 0; i < static_cast<int>(result_rows.size()); ++i) {
+            result_rows[i].row(0).copyTo(output.row(i));
+        }
+        return output;
+    }
+
+    // points3d: (M,18) [p0.x,p0.y,...,p7.x,p7.y,conf,cls].
+    // p0..p3 are bottom corners and p4..p7 are their corresponding top
+    // corners. This method does not require a 2D detection input.
+    cv::Mat cuboids_from_3D(const cv::Mat& points3d,
+                            double z_world) const {
+        CV_Assert(points3d.empty() ||
+                  (points3d.channels() == 1 &&
+                   points3d.cols == 18 &&
+                   (points3d.type() == CV_32F ||
+                    points3d.type() == CV_64F)));
+        const int N = points3d.rows;
+        cv::Mat cuboids(N, 9, CV_32F, cv::Scalar(0));
+        for (int i = 0; i < N; ++i) {
+            cuboids.at<float>(i, 3) = -1.0f;
+            cuboids.at<float>(i, 4) = -1.0f;
+            cuboids.at<float>(i, 5) = -1.0f;
+            cuboids.at<float>(i, 6) = points3d.type() == CV_32F
+                ? points3d.at<float>(i, 16)
+                : static_cast<float>(points3d.at<double>(i, 16));
+            cuboids.at<float>(i, 7) = points3d.type() == CV_32F
+                ? points3d.at<float>(i, 17)
+                : static_cast<float>(points3d.at<double>(i, 17));
+
+            const int cid = static_cast<int>(std::llround(
+                cuboids.at<float>(i, 7)));
+            const auto size_it = id2size_.find(cid);
+            const double prior_h = size_it == id2size_.end()
+                ? std::numeric_limits<double>::quiet_NaN()
+                : size_it->second[2];
+
+            auto read_uv = [&](int point_index) {
+                const int col = 2 * point_index;
+                if (points3d.type() == CV_32F) {
+                    return cv::Vec2d(points3d.at<float>(i, col),
+                                     points3d.at<float>(i, col + 1));
+                }
+                return cv::Vec2d(points3d.at<double>(i, col),
+                                 points3d.at<double>(i, col + 1));
+            };
+
+            // 第二路观测：由有效 3D 投影点生成伪 2D 框，复用原始 solver。
+            cv::Mat pseudo_obj(1, 7, CV_32F, cv::Scalar(0));
+            pseudo_obj.at<float>(0, 4) = cuboids.at<float>(i, 6);
+            pseudo_obj.at<float>(0, 5) = cuboids.at<float>(i, 7);
+            int valid_point_count = 0;
+            double min_u = std::numeric_limits<double>::infinity();
+            double max_u = -std::numeric_limits<double>::infinity();
+            double min_v = std::numeric_limits<double>::infinity();
+            double max_v = -std::numeric_limits<double>::infinity();
+            for (int k = 0; k < 8; ++k) {
+                const cv::Vec2d uv = read_uv(k);
+                if (!std::isfinite(uv[0]) || !std::isfinite(uv[1])) continue;
+                ++valid_point_count;
+                min_u = std::min(min_u, uv[0]);
+                max_u = std::max(max_u, uv[0]);
+                min_v = std::min(min_v, uv[1]);
+                max_v = std::max(max_v, uv[1]);
+            }
+            cv::Mat pseudo_cuboid;
+            if (valid_point_count >= 4 && max_u > min_u && max_v > min_v) {
+                pseudo_obj.at<float>(0, 0) = static_cast<float>(min_u);
+                pseudo_obj.at<float>(0, 1) = static_cast<float>(min_v);
+                pseudo_obj.at<float>(0, 2) = static_cast<float>(max_u);
+                pseudo_obj.at<float>(0, 3) = static_cast<float>(max_v);
+                pseudo_cuboid = cuboids_from_boxes(
+                    pseudo_obj, z_world, cv::Mat());
+            }
+
+            std::array<cv::Vec3d, 4> bottom;
+            std::vector<double> heights;
+            bool valid = std::isfinite(z_world);
+
+            for (int k = 0; k < 4 && valid; ++k) {
+                const cv::Vec2d uv = read_uv(k);
+                valid = intersect_uv_with_z(uv[0], uv[1], z_world, bottom[k]);
+            }
+            if (!valid) {
+                if (!pseudo_cuboid.empty()) {
+                    pseudo_cuboid.row(0).copyTo(cuboids.row(i));
+                }
+                continue;
+            }
+
+            for (int k = 0; k < 4 && valid; ++k) {
+                const cv::Vec2d top_uv = read_uv(k + 4);
+                const cv::Vec3d top_ray = world_ray_dir(
+                    top_uv[0], top_uv[1]);
+                const double norm2 = top_ray[0] * top_ray[0] +
+                                     top_ray[1] * top_ray[1];
+                if (!std::isfinite(norm2) || norm2 < 1e-12) {
+                    valid = false;
+                    break;
+                }
+
+                const double tx = bottom[k][0] - C_w_[0];
+                const double ty = bottom[k][1] - C_w_[1];
+                const double lambda = (tx * top_ray[0] +
+                                       ty * top_ray[1]) / norm2;
+                if (!std::isfinite(lambda) || lambda <= 1e-8) {
+                    valid = false;
+                    break;
+                }
+
+                const double top_z = C_w_[2] + lambda * top_ray[2];
+                const double xy_error = std::hypot(
+                    C_w_[0] + lambda * top_ray[0] - bottom[k][0],
+                    C_w_[1] + lambda * top_ray[1] - bottom[k][1]);
+                const double height = top_z - z_world;
+                if (!std::isfinite(height) || height <= 1e-4 ||
+                    !std::isfinite(xy_error) || xy_error > 0.15) {
+                    valid = false;
+                    break;
+                }
+                heights.push_back(height);
+            }
+
+            if (!valid || heights.size() != 4) {
+                if (!std::isfinite(prior_h) || prior_h <= 1e-4) {
+                    if (!pseudo_cuboid.empty()) {
+                        pseudo_cuboid.row(0).copyTo(cuboids.row(i));
+                    }
+                    continue;
+                }
+                heights.assign(4, prior_h);
+            }
+
+            std::sort(heights.begin(), heights.end());
+            double height = 0.5 * (heights[1] + heights[2]);
+            if (!std::isfinite(height) || height <= 1e-4) {
+                if (!pseudo_cuboid.empty()) {
+                    pseudo_cuboid.row(0).copyTo(cuboids.row(i));
+                }
+                continue;
+            }
+
+            // 所有障碍物均采用动态宽度：由前后两条底边的实测距离
+            // 平均得到，不再仅使用 whitelist 中的固定 width 先验。
+            const double dynamic_width = 0.5 * (
+                std::hypot(bottom[1][0] - bottom[0][0],
+                           bottom[1][1] - bottom[0][1]) +
+                std::hypot(bottom[2][0] - bottom[3][0],
+                           bottom[2][1] - bottom[3][1]));
+            const double dynamic_length = 0.5 * (
+                std::hypot(bottom[2][0] - bottom[1][0],
+                           bottom[2][1] - bottom[1][1]) +
+                std::hypot(bottom[3][0] - bottom[0][0],
+                           bottom[3][1] - bottom[0][1]));
+            if (!std::isfinite(dynamic_width) ||
+                !std::isfinite(dynamic_length) ||
+                dynamic_width <= 1e-4 || dynamic_length <= 1e-4) {
+                if (!pseudo_cuboid.empty()) {
+                    pseudo_cuboid.row(0).copyTo(cuboids.row(i));
+                }
+                continue;
+            }
+
+            cv::Vec3d bottom_center(0.0, 0.0, z_world);
+            for (const auto& p : bottom) {
+                bottom_center[0] += 0.25 * p[0];
+                bottom_center[1] += 0.25 * p[1];
+            }
+
+            double theta = 0.0;
+            if (cid == 0) {
+                // 人员 3D 点的前后方向不稳定，使用相机到人员中心的
+                // 径向方向，行为与原始 2D 人员 solver 更接近。
+                theta = std::atan2(
+                    bottom_center[1] - C_w_[1],
+                    bottom_center[0] - C_w_[0]);
+            } else {
+                const cv::Vec2d front_mid(
+                    0.5 * (bottom[0][0] + bottom[1][0]),
+                    0.5 * (bottom[0][1] + bottom[1][1]));
+                const cv::Vec2d rear_mid(
+                    0.5 * (bottom[2][0] + bottom[3][0]),
+                    0.5 * (bottom[2][1] + bottom[3][1]));
+                const cv::Vec2d direction = front_mid - rear_mid;
+                if (!std::isfinite(direction[0]) ||
+                    !std::isfinite(direction[1]) ||
+                    std::hypot(direction[0], direction[1]) <= 1e-4) {
+                    continue;
+                }
+                theta = std::atan2(direction[1], direction[0]);
+            }
+
+            // 人员按圆柱底面处理，长度使用宽度，避免不稳定的前后方向
+            // 将人员尺寸拉成长条。
+            const double output_l = cid == 0 ? dynamic_width : dynamic_length;
+            const double output_w = dynamic_width;
+            cuboids.at<float>(i, 0) = static_cast<float>(bottom_center[0]);
+            cuboids.at<float>(i, 1) = static_cast<float>(bottom_center[1]);
+            cuboids.at<float>(i, 2) = static_cast<float>(
+                z_world + 0.5 * height);
+            cuboids.at<float>(i, 3) = static_cast<float>(output_l);
+            cuboids.at<float>(i, 4) = static_cast<float>(output_w);
+            cuboids.at<float>(i, 5) = static_cast<float>(height);
+            cuboids.at<float>(i, 8) = static_cast<float>(wrap_to_pi(theta));
+
+            const bool direct_valid =
+                std::isfinite(cuboids.at<float>(i, 0)) &&
+                std::isfinite(cuboids.at<float>(i, 1)) &&
+                std::isfinite(cuboids.at<float>(i, 2)) &&
+                cuboids.at<float>(i, 3) > 0.0f &&
+                cuboids.at<float>(i, 4) > 0.0f &&
+                cuboids.at<float>(i, 5) > 0.0f;
+            const bool pseudo_valid =
+                !pseudo_cuboid.empty() &&
+                pseudo_cuboid.at<float>(0, 3) > 0.0f &&
+                pseudo_cuboid.at<float>(0, 4) > 0.0f &&
+                pseudo_cuboid.at<float>(0, 5) > 0.0f;
+            if (pseudo_valid && direct_valid) {
+                const double center_error = std::hypot(
+                    cuboids.at<float>(i, 0) - pseudo_cuboid.at<float>(0, 0),
+                    cuboids.at<float>(i, 1) - pseudo_cuboid.at<float>(0, 1));
+                const double depth_error = std::abs(
+                    cuboids.at<float>(i, 2) - pseudo_cuboid.at<float>(0, 2));
+                const double length_error = std::abs(
+                    cuboids.at<float>(i, 3) - pseudo_cuboid.at<float>(0, 3)) /
+                    std::max(1e-3, static_cast<double>(
+                        cuboids.at<float>(i, 3)));
+                const double width_error = std::abs(
+                    cuboids.at<float>(i, 4) - pseudo_cuboid.at<float>(0, 4)) /
+                    std::max(1e-3, static_cast<double>(
+                        cuboids.at<float>(i, 4)));
+                const double theta_error = std::abs(wrap_to_pi(
+                    cuboids.at<float>(i, 8) - pseudo_cuboid.at<float>(0, 8)));
+                const bool geometry_consistent =
+                    center_error <= 1.5 && depth_error <= 1.5 &&
+                    length_error <= 1.0 && width_error <= 1.0 &&
+                    (cid == 0 || theta_error <= 0.5 * CV_PI);
+
+                if (geometry_consistent) {
+                    const double direct_quality = std::max(
+                        0.2, static_cast<double>(valid_point_count) / 8.0);
+                    const double pseudo_quality = std::max(
+                        0.2, 1.0 - 0.5 * std::min(1.0, width_error));
+                    const double direct_weight =
+                        direct_quality / (direct_quality + pseudo_quality);
+                    const double pseudo_weight = 1.0 - direct_weight;
+                    for (int k = 0; k < 6; ++k) {
+                        cuboids.at<float>(i, k) = static_cast<float>(
+                            direct_weight * cuboids.at<float>(i, k) +
+                            pseudo_weight * pseudo_cuboid.at<float>(0, k));
+                    }
+                    if (cid != 0) {
+                        const double sin_theta =
+                            direct_weight * std::sin(cuboids.at<float>(i, 8)) +
+                            pseudo_weight * std::sin(pseudo_cuboid.at<float>(0, 8));
+                        const double cos_theta =
+                            direct_weight * std::cos(cuboids.at<float>(i, 8)) +
+                            pseudo_weight * std::cos(pseudo_cuboid.at<float>(0, 8));
+                        cuboids.at<float>(i, 8) = static_cast<float>(
+                            std::atan2(sin_theta, cos_theta));
+                    }
+                }
+            }
+        }
+        return cuboids;
+    }
+
+    cv::Mat cuboids_from_boxesAnd3DAligned(const cv::Mat& objs,
+                                           const cv::Mat& points3d,
+                                           double z_world,
+                                           const cv::Mat& masks) const {
+        CV_Assert(objs.type() == CV_32F);
+        CV_Assert(objs.cols == 7);
+        cv::Mat fallback = cuboids_from_boxes(objs, z_world, masks);
+        if (points3d.empty()) {
+            return fallback;
+        }
+        CV_Assert(points3d.rows == objs.rows);
+
+        const bool flat_points =
+            (points3d.channels() == 1 &&
+             (points3d.cols == 16) &&
+             (points3d.type() == CV_32F || points3d.type() == CV_64F));
+        const bool packed_points =
+            (points3d.channels() == 2 &&
+             (points3d.cols == 8) &&
+             (points3d.type() == CV_32FC2 || points3d.type() == CV_64FC2));
+        CV_Assert(flat_points || packed_points);
+
+        auto read_point = [&](int row, int point_index) -> cv::Vec2d {
+            if (flat_points) {
+                if (points3d.type() == CV_32F) {
+                    return cv::Vec2d(
+                        points3d.at<float>(row, 2 * point_index),
+                        points3d.at<float>(row, 2 * point_index + 1));
+                }
+                return cv::Vec2d(
+                    points3d.at<double>(row, 2 * point_index),
+                    points3d.at<double>(row, 2 * point_index + 1));
+            }
+            if (points3d.type() == CV_32FC2) {
+                const cv::Vec2f p = points3d.at<cv::Vec2f>(row, point_index);
+                return cv::Vec2d(p[0], p[1]);
+            }
+            const cv::Vec2d p = points3d.at<cv::Vec2d>(row, point_index);
+            return p;
+        };
+
+        auto finite_vec2 = [](const cv::Vec2d& p) {
+            return std::isfinite(p[0]) && std::isfinite(p[1]);
+        };
+
+        auto recover_edge = [&](const cv::Vec2d& bottom_uv,
+                                const cv::Vec2d& top_uv,
+                                double expected_height,
+                                cv::Vec3d& bottom,
+                                cv::Vec3d& top) -> bool {
+            if (!finite_vec2(bottom_uv) || !finite_vec2(top_uv)) return false;
+            const cv::Vec3d db = world_ray_dir(bottom_uv[0], bottom_uv[1]);
+            const cv::Vec3d dt = world_ray_dir(top_uv[0], top_uv[1]);
+            if (!std::isfinite(expected_height) || expected_height <= 1e-4) {
+                return false;
+            }
+
+            // Solve lb*db - lt*dt = (0, 0, -height) in least squares.
+            const double a[3][2] = {
+                {db[0], -dt[0]},
+                {db[1], -dt[1]},
+                {db[2], -dt[2]},
+            };
+            const double b[3] = {0.0, 0.0, -expected_height};
+            double ata00 = 0.0, ata01 = 0.0, ata11 = 0.0;
+            double atb0 = 0.0, atb1 = 0.0;
+            for (int r = 0; r < 3; ++r) {
+                ata00 += a[r][0] * a[r][0];
+                ata01 += a[r][0] * a[r][1];
+                ata11 += a[r][1] * a[r][1];
+                atb0 += a[r][0] * b[r];
+                atb1 += a[r][1] * b[r];
+            }
+            const double det = ata00 * ata11 - ata01 * ata01;
+            if (!std::isfinite(det) || std::abs(det) < 1e-12) return false;
+            const double lb = (atb0 * ata11 - ata01 * atb1) / det;
+            const double lt = (ata00 * atb1 - ata01 * atb0) / det;
+            if (!std::isfinite(lb) || !std::isfinite(lt) ||
+                lb <= 1e-8 || lt <= 1e-8) return false;
+
+            const cv::Vec3d pb = C_w_ + lb * db;
+            const cv::Vec3d pt = C_w_ + lt * dt;
+            const double residual = std::sqrt(
+                std::pow(pb[0] - pt[0], 2) +
+                std::pow(pb[1] - pt[1], 2) +
+                std::pow((pt[2] - pb[2]) - expected_height, 2));
+            if (!std::isfinite(residual) || residual > 0.05) return false;
+            bottom = pb;
+            top = pt;
+            return true;
+        };
+
+        // 将 3D 底部投影点转换为伪 2D 框，再复用原始 2D solver。
+        // 对圆柱图像按一个周期展开，避免目标跨越图像首尾边界时宽度异常。
+        cv::Mat points_box_objs = objs.clone();
+        const double u_period = 2.0 * CV_PI * f_;
+        for (int i = 0; i < objs.rows; ++i) {
+            const float invalid_coord =
+                std::numeric_limits<float>::quiet_NaN();
+            points_box_objs.at<float>(i, 0) = invalid_coord;
+            points_box_objs.at<float>(i, 1) = invalid_coord;
+            points_box_objs.at<float>(i, 2) = invalid_coord;
+            points_box_objs.at<float>(i, 3) = invalid_coord;
+            std::array<cv::Vec2d, 4> bottom_uv;
+            for (int k = 0; k < 4; ++k) {
+                bottom_uv[k] = read_point(i, k);
+            }
+
+            bool valid_points = true;
+            for (const auto& p : bottom_uv) {
+                valid_points = valid_points && finite_vec2(p);
+            }
+            if (!valid_points || !std::isfinite(u_period) || u_period <= 0.0) {
+                continue;
+            }
+
+            const double u_ref = bottom_uv[0][0];
+            double u_left = u_ref;
+            double u_right = u_ref;
+            double v_bottom = bottom_uv[0][1];
+            for (const auto& p : bottom_uv) {
+                double u = p[0];
+                while (u - u_ref > 0.5 * u_period) u -= u_period;
+                while (u - u_ref < -0.5 * u_period) u += u_period;
+                u_left = std::min(u_left, u);
+                u_right = std::max(u_right, u);
+                v_bottom = std::max(v_bottom, p[1]);
+            }
+
+            points_box_objs.at<float>(i, 0) = static_cast<float>(u_left);
+            points_box_objs.at<float>(i, 1) = static_cast<float>(v_bottom);
+            points_box_objs.at<float>(i, 2) = static_cast<float>(u_right);
+            points_box_objs.at<float>(i, 3) = static_cast<float>(v_bottom);
+
+            // 使用底面前边中点(p0,p1)到后边中点(p2,p3)的方向，
+            // 生成伪 2D solver 所需的相对朝向。
+            cv::Vec3d p0_world, p1_world, p2_world, p3_world;
+            if (intersect_uv_with_z(bottom_uv[0][0], bottom_uv[0][1],
+                                    z_world, p0_world) &&
+                intersect_uv_with_z(bottom_uv[1][0], bottom_uv[1][1],
+                                    z_world, p1_world) &&
+                intersect_uv_with_z(bottom_uv[2][0], bottom_uv[2][1],
+                                    z_world, p2_world) &&
+                intersect_uv_with_z(bottom_uv[3][0], bottom_uv[3][1],
+                                    z_world, p3_world)) {
+                const cv::Vec2d front_mid(
+                    0.5 * (p0_world[0] + p1_world[0]),
+                    0.5 * (p0_world[1] + p1_world[1]));
+                const cv::Vec2d rear_mid(
+                    0.5 * (p2_world[0] + p3_world[0]),
+                    0.5 * (p2_world[1] + p3_world[1]));
+                const cv::Vec2d direction = front_mid - rear_mid;
+                if (std::isfinite(direction[0]) &&
+                    std::isfinite(direction[1]) &&
+                    std::hypot(direction[0], direction[1]) > 1e-4) {
+                    const double theta_3d =
+                        std::atan2(direction[1], direction[0]);
+                    const double u_mid = 0.5 * (u_left + u_right);
+                    const cv::Vec3d mid_ray = world_ray_dir(u_mid, v_bottom);
+                    if (std::hypot(mid_ray[0], mid_ray[1]) > 1e-8) {
+                        const double ray_azimuth =
+                            std::atan2(mid_ray[1], mid_ray[0]);
+                        points_box_objs.at<float>(i, 6) = static_cast<float>(
+                            wrap_to_pi(theta_3d - ray_azimuth));
+                    }
+                }
+            }
+        }
+        const cv::Mat cuboids_from_points_box =
+            cuboids_from_boxes(points_box_objs, z_world, cv::Mat());
+
+        for (int i = 0; i < objs.rows; ++i) {
+            const int cid = static_cast<int>(std::llround(objs.at<float>(i, 5)));
+            double expected_height = static_cast<double>(fallback.at<float>(i, 5));
+            if (!std::isfinite(expected_height) || expected_height <= 1e-4) {
+                const auto size_it = id2size_.find(cid);
+                if (size_it == id2size_.end()) continue;
+                expected_height = size_it->second[2];
+            }
+            std::array<cv::Vec3d, 4> bottoms;
+            std::array<cv::Vec3d, 4> tops;
+            bool valid = true;
+            for (int k = 0; k < 4; ++k) {
+                if (!recover_edge(read_point(i, k), read_point(i, k + 4),
+                                  expected_height,
+                                  bottoms[k], tops[k])) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (!valid) continue;
+
+            cv::Vec3d bottom_center(0.0, 0.0, 0.0);
+            cv::Vec3d top_center(0.0, 0.0, 0.0);
+            for (int k = 0; k < 4; ++k) {
+                bottom_center += bottoms[k];
+                top_center += tops[k];
+            }
+            bottom_center *= 0.25;
+            top_center *= 0.25;
+
+            // Keep the original cuboids_from_boxes height as the stable
+            // class prior; the eight points refine position, length, width,
+            // and orientation without changing the output contract.
+            const double h = expected_height;
+            const double width_front = std::hypot(
+                bottoms[1][0] - bottoms[0][0],
+                bottoms[1][1] - bottoms[0][1]);
+            const double width_rear = std::hypot(
+                bottoms[2][0] - bottoms[3][0],
+                bottoms[2][1] - bottoms[3][1]);
+            const double length_right = std::hypot(
+                bottoms[2][0] - bottoms[1][0],
+                bottoms[2][1] - bottoms[1][1]);
+            const double length_left = std::hypot(
+                bottoms[3][0] - bottoms[0][0],
+                bottoms[3][1] - bottoms[0][1]);
+            const cv::Vec2d front_mid(
+                0.5 * (bottoms[0][0] + bottoms[1][0]),
+                0.5 * (bottoms[0][1] + bottoms[1][1]));
+            const cv::Vec2d rear_mid(
+                0.5 * (bottoms[2][0] + bottoms[3][0]),
+                0.5 * (bottoms[2][1] + bottoms[3][1]));
+            const cv::Vec2d direction = front_mid - rear_mid;
+            const double theta = std::atan2(direction[1], direction[0]);
+            const double l = 0.5 * (length_left + length_right);
+            const double w = 0.5 * (width_front + width_rear);
+            if (!std::isfinite(h) || !std::isfinite(l) || !std::isfinite(w) ||
+                h <= 1e-4 || l <= 1e-4 || w <= 1e-4 ||
+                !std::isfinite(theta)) {
+                continue;
+            }
+
+            cv::Mat& out = fallback;
+            // 先融合“原始框 solver”和“3D 点生成伪框 solver”，
+            // 再与直接八点结果融合，形成三路相互验证。
+            const bool points_box_valid =
+                std::isfinite(cuboids_from_points_box.at<float>(i, 0)) &&
+                std::isfinite(cuboids_from_points_box.at<float>(i, 1)) &&
+                std::isfinite(cuboids_from_points_box.at<float>(i, 2)) &&
+                cuboids_from_points_box.at<float>(i, 3) > 0.0f &&
+                cuboids_from_points_box.at<float>(i, 4) > 0.0f &&
+                cuboids_from_points_box.at<float>(i, 5) > 0.0f;
+            const bool original_valid_before_box =
+                std::isfinite(out.at<float>(i, 0)) &&
+                std::isfinite(out.at<float>(i, 1)) &&
+                std::isfinite(out.at<float>(i, 2)) &&
+                out.at<float>(i, 3) > 0.0f &&
+                out.at<float>(i, 4) > 0.0f &&
+                out.at<float>(i, 5) > 0.0f;
+            if (points_box_valid && original_valid_before_box) {
+                const double box_xy_error = std::hypot(
+                    out.at<float>(i, 0) - cuboids_from_points_box.at<float>(i, 0),
+                    out.at<float>(i, 1) - cuboids_from_points_box.at<float>(i, 1));
+                const double box_z_error = std::abs(
+                    out.at<float>(i, 2) - cuboids_from_points_box.at<float>(i, 2));
+                const double box_l_error = std::abs(
+                    out.at<float>(i, 3) - cuboids_from_points_box.at<float>(i, 3)) /
+                    std::max(1e-3, static_cast<double>(out.at<float>(i, 3)));
+                const double box_w_error = std::abs(
+                    out.at<float>(i, 4) - cuboids_from_points_box.at<float>(i, 4)) /
+                    std::max(1e-3, static_cast<double>(out.at<float>(i, 4)));
+                if (box_xy_error <= 1.0 && box_z_error <= 1.0 &&
+                    box_l_error <= 0.75 && box_w_error <= 0.75) {
+                    constexpr double original_box_weight = 0.5;
+                    constexpr double points_box_weight = 1.0 - original_box_weight;
+                    for (int k = 0; k < 6; ++k) {
+                        out.at<float>(i, k) = static_cast<float>(
+                            original_box_weight * out.at<float>(i, k) +
+                            points_box_weight *
+                                cuboids_from_points_box.at<float>(i, k));
+                    }
+                }
+            }
+
+            double point_cx = 0.5 * (bottom_center[0] + top_center[0]);
+            double point_cy = 0.5 * (bottom_center[1] + top_center[1]);
+            double point_cz = 0.5 * (bottom_center[2] + top_center[2]);
+            double point_l = l;
+            double point_w = w;
+            double point_h = h;
+            double point_height_spread = 1.0;
+
+            // 用原始结果提供底面深度尺度，再由顶部 3D 点反推出实际高度。
+            // 这样 fixed-size 和 dynamic-width 两种原始 solver 都能修正先验 h。
+            const bool original_geometry_valid =
+                out.at<float>(i, 3) > 0.0f &&
+                out.at<float>(i, 4) > 0.0f &&
+                out.at<float>(i, 5) > 0.0f &&
+                std::isfinite(out.at<float>(i, 2));
+            const double base_z = original_geometry_valid
+                ? static_cast<double>(out.at<float>(i, 2)) -
+                      0.5 * static_cast<double>(out.at<float>(i, 5))
+                : z_world;
+            double original_quality = 0.0;
+            double point_quality = 0.0;
+            if (std::isfinite(base_z)) {
+                std::array<cv::Vec3d, 4> measured_bottoms;
+                std::vector<double> measured_heights;
+                bool refined_geometry_valid = true;
+                for (int k = 0; k < 4; ++k) {
+                    if (!intersect_uv_with_z(
+                            read_point(i, k)[0], read_point(i, k)[1],
+                            base_z, measured_bottoms[k])) {
+                        refined_geometry_valid = false;
+                        break;
+                    }
+
+                    const cv::Vec2d top_uv = read_point(i, k + 4);
+                    const cv::Vec3d top_ray = world_ray_dir(top_uv[0], top_uv[1]);
+                    const double dx = top_ray[0];
+                    const double dy = top_ray[1];
+                    const double norm2 = dx * dx + dy * dy;
+                    if (!std::isfinite(norm2) || norm2 < 1e-12) {
+                        refined_geometry_valid = false;
+                        break;
+                    }
+
+                    const double tx = measured_bottoms[k][0] - C_w_[0];
+                    const double ty = measured_bottoms[k][1] - C_w_[1];
+                    const double lambda = (tx * dx + ty * dy) / norm2;
+                    if (!std::isfinite(lambda) || lambda <= 1e-8) {
+                        refined_geometry_valid = false;
+                        break;
+                    }
+
+                    const double top_z = C_w_[2] + lambda * top_ray[2];
+                    const double measured_h = top_z - base_z;
+                    const double xy_error = std::hypot(
+                        C_w_[0] + lambda * dx - measured_bottoms[k][0],
+                        C_w_[1] + lambda * dy - measured_bottoms[k][1]);
+                    if (!std::isfinite(measured_h) || measured_h <= 1e-4 ||
+                        !std::isfinite(xy_error) || xy_error > 0.15) {
+                        refined_geometry_valid = false;
+                        break;
+                    }
+                    measured_heights.push_back(measured_h);
+                }
+
+                if (refined_geometry_valid && measured_heights.size() == 4) {
+                    std::sort(measured_heights.begin(), measured_heights.end());
+                    const double refined_h =
+                        0.5 * (measured_heights[1] + measured_heights[2]);
+                    point_height_spread =
+                        (measured_heights[3] - measured_heights[0]) /
+                        std::max(1e-3, refined_h);
+                    const double refined_l = 0.5 * (
+                        std::hypot(measured_bottoms[2][0] - measured_bottoms[1][0],
+                                   measured_bottoms[2][1] - measured_bottoms[1][1]) +
+                        std::hypot(measured_bottoms[3][0] - measured_bottoms[0][0],
+                                   measured_bottoms[3][1] - measured_bottoms[0][1]));
+                    const double refined_w = 0.5 * (
+                        std::hypot(measured_bottoms[1][0] - measured_bottoms[0][0],
+                                   measured_bottoms[1][1] - measured_bottoms[0][1]) +
+                        std::hypot(measured_bottoms[2][0] - measured_bottoms[3][0],
+                                   measured_bottoms[2][1] - measured_bottoms[3][1]));
+                    if (std::isfinite(refined_h) && std::isfinite(refined_l) &&
+                        std::isfinite(refined_w) && refined_h > 1e-4 &&
+                        refined_l > 1e-4 && refined_w > 1e-4) {
+                        cv::Vec3d measured_bottom_center(0.0, 0.0, base_z);
+                        for (const auto& p : measured_bottoms) {
+                            measured_bottom_center[0] += p[0] * 0.25;
+                            measured_bottom_center[1] += p[1] * 0.25;
+                        }
+                        point_cx = measured_bottom_center[0];
+                        point_cy = measured_bottom_center[1];
+                        point_cz = base_z + 0.5 * refined_h;
+                        point_l = refined_l;
+                        point_w = refined_w;
+                        point_h = refined_h;
+                    }
+                }
+
+                auto clamp01 = [](double value) {
+                    if (!std::isfinite(value)) return 0.0;
+                    return std::max(0.0, std::min(1.0, value));
+                };
+
+                // 2D 观测不确定性：低置信度、小目标、极端长宽比都会降低可靠性。
+                const double detection_conf = clamp01(
+                    static_cast<double>(objs.at<float>(i, 4)));
+                const double box_width = std::abs(
+                    static_cast<double>(objs.at<float>(i, 2)) -
+                    static_cast<double>(objs.at<float>(i, 0)));
+                const double box_height = std::abs(
+                    static_cast<double>(objs.at<float>(i, 3)) -
+                    static_cast<double>(objs.at<float>(i, 1)));
+                const double box_scale = std::sqrt(std::max(1.0, box_width * box_height));
+                const double size_quality = box_scale / (box_scale + 32.0);
+                const double aspect_ratio = std::max(
+                    box_width / std::max(1e-3, box_height),
+                    box_height / std::max(1e-3, box_width));
+                const double aspect_penalty = std::max(
+                    0.0, std::log(std::max(1.0, aspect_ratio)) - std::log(2.0));
+                const double aspect_quality =
+                    1.0 / (1.0 + aspect_penalty);
+                original_quality = clamp01(
+                    detection_conf * size_quality * aspect_quality);
+
+                // 3D 观测不确定性：几何不一致越大，3D 源可靠性越低。
+                const double point_geometry_quality = clamp01(
+                    1.0 / (1.0 + 4.0 * std::max(0.0, point_height_spread)));
+                point_quality = clamp01(
+                    0.85 * point_geometry_quality + 0.15);
+            }
+
+            if (cid == 0) {
+                // 人员的点朝向不稳定：用原始解算的朝向和尺寸，
+                // 只在 3D 点与原始结果相互一致时融合空间位置。
+                const bool original_valid =
+                    std::isfinite(out.at<float>(i, 0)) &&
+                    std::isfinite(out.at<float>(i, 1)) &&
+                    std::isfinite(out.at<float>(i, 2)) &&
+                    out.at<float>(i, 3) > 0.0f &&
+                    out.at<float>(i, 4) > 0.0f &&
+                    out.at<float>(i, 5) > 0.0f;
+                if (original_valid) {
+                    const double original_cx = out.at<float>(i, 0);
+                    const double original_cy = out.at<float>(i, 1);
+                    const double original_cz = out.at<float>(i, 2);
+                    const double xy_error = std::hypot(
+                        point_cx - original_cx, point_cy - original_cy);
+                    const double z_error = std::abs(point_cz - original_cz);
+                    const double theta_error = std::abs(
+                        wrap_to_pi(theta - out.at<float>(i, 8)));
+
+                    // 两个独立观测差异过大时，认为点输入异常，不污染原始结果。
+                    if (theta_error > 0.25 * CV_PI &&
+                        std::isfinite(xy_error) && xy_error <= 1.0 &&
+                        std::isfinite(z_error) && z_error <= 1.0) {
+                        // 方向冲突时，以 3D 前后中点方向为准。
+                        out.at<float>(i, 0) = static_cast<float>(point_cx);
+                        out.at<float>(i, 1) = static_cast<float>(point_cy);
+                        out.at<float>(i, 2) = static_cast<float>(point_cz);
+                        out.at<float>(i, 3) = static_cast<float>(point_l);
+                        out.at<float>(i, 4) = static_cast<float>(point_w);
+                        out.at<float>(i, 5) = static_cast<float>(point_h);
+                        out.at<float>(i, 8) = static_cast<float>(
+                            wrap_to_pi(theta));
+                    } else if (std::isfinite(xy_error) && std::isfinite(z_error) &&
+                        xy_error <= 1.0 && z_error <= 1.0) {
+                        const double quality_sum = original_quality + point_quality;
+                        const double original_weight = quality_sum > 1e-8
+                            ? original_quality / quality_sum : 0.5;
+                        const double point_weight = 1.0 - original_weight;
+                        out.at<float>(i, 0) = static_cast<float>(
+                            original_weight * original_cx + point_weight * point_cx);
+                        out.at<float>(i, 1) = static_cast<float>(
+                            original_weight * original_cy + point_weight * point_cy);
+                        out.at<float>(i, 2) = static_cast<float>(
+                            original_weight * original_cz + point_weight * point_cz);
+                        const double l_error = std::abs(point_l - out.at<float>(i, 3)) /
+                                               std::max(1e-3, static_cast<double>(out.at<float>(i, 3)));
+                        const double w_error = std::abs(point_w - out.at<float>(i, 4)) /
+                                               std::max(1e-3, static_cast<double>(out.at<float>(i, 4)));
+                        const double h_error = std::abs(point_h - out.at<float>(i, 5)) /
+                                               std::max(1e-3, static_cast<double>(out.at<float>(i, 5)));
+                        if (l_error <= 0.75 && w_error <= 0.75 &&
+                            h_error <= 0.75) {
+                            out.at<float>(i, 3) = static_cast<float>(
+                                original_weight * out.at<float>(i, 3) +
+                                point_weight * point_l);
+                            out.at<float>(i, 4) = static_cast<float>(
+                                original_weight * out.at<float>(i, 4) +
+                                point_weight * point_w);
+                            out.at<float>(i, 5) = static_cast<float>(
+                                original_weight * out.at<float>(i, 5) +
+                                point_weight * point_h);
+                        }
+                    }
+                } else {
+                    // 原始结果无效时，使用通过高度先验验证过的 3D 点结果。
+                    out.at<float>(i, 0) = static_cast<float>(point_cx);
+                    out.at<float>(i, 1) = static_cast<float>(point_cy);
+                    out.at<float>(i, 2) = static_cast<float>(point_cz);
+                    out.at<float>(i, 3) = static_cast<float>(
+                        point_l);
+                    out.at<float>(i, 4) = static_cast<float>(
+                        point_w);
+                    out.at<float>(i, 5) = static_cast<float>(point_h);
+                }
+                continue;
+            }
+
+            const bool original_valid =
+                std::isfinite(out.at<float>(i, 0)) &&
+                std::isfinite(out.at<float>(i, 1)) &&
+                std::isfinite(out.at<float>(i, 2)) &&
+                out.at<float>(i, 3) > 0.0f &&
+                out.at<float>(i, 4) > 0.0f &&
+                out.at<float>(i, 5) > 0.0f;
+            if (!original_valid) {
+                out.at<float>(i, 0) = static_cast<float>(point_cx);
+                out.at<float>(i, 1) = static_cast<float>(point_cy);
+                out.at<float>(i, 2) = static_cast<float>(point_cz);
+                out.at<float>(i, 3) = static_cast<float>(point_l);
+                out.at<float>(i, 4) = static_cast<float>(point_w);
+                out.at<float>(i, 5) = static_cast<float>(point_h);
+                out.at<float>(i, 8) = static_cast<float>(wrap_to_pi(theta));
+                continue;
+            }
+
+            const double original_cx = out.at<float>(i, 0);
+            const double original_cy = out.at<float>(i, 1);
+            const double original_cz = out.at<float>(i, 2);
+            const double original_l = out.at<float>(i, 3);
+            const double original_w = out.at<float>(i, 4);
+            const double original_h = out.at<float>(i, 5);
+            const double original_theta = out.at<float>(i, 8);
+            const double xy_error = std::hypot(
+                point_cx - original_cx, point_cy - original_cy);
+            const double z_error = std::abs(point_cz - original_cz);
+            const double l_error = std::abs(point_l - original_l) /
+                                   std::max(1e-3, original_l);
+            const double w_error = std::abs(point_w - original_w) /
+                                   std::max(1e-3, original_w);
+            const double h_error = std::abs(point_h - original_h) /
+                                   std::max(1e-3, original_h);
+            const double theta_error = std::abs(
+                wrap_to_pi(theta - original_theta));
+            const bool geometry_consistent =
+                std::isfinite(xy_error) && xy_error <= 1.0 &&
+                std::isfinite(z_error) && z_error <= 1.0 &&
+                std::isfinite(l_error) && l_error <= 0.75 &&
+                std::isfinite(w_error) && w_error <= 0.75 &&
+                std::isfinite(h_error) && h_error <= 0.75;
+
+            // 只有两路结果相互一致时才融合，避免异常 3D 点污染原始结果。
+            if (geometry_consistent && theta_error > 0.25 * CV_PI) {
+                // 2D 方向发生明显翻转或误检时，用 3D 前后中点方向
+                // 直接矫正整个 2D 解算结果。
+                out.at<float>(i, 0) = static_cast<float>(point_cx);
+                out.at<float>(i, 1) = static_cast<float>(point_cy);
+                out.at<float>(i, 2) = static_cast<float>(point_cz);
+                out.at<float>(i, 3) = static_cast<float>(point_l);
+                out.at<float>(i, 4) = static_cast<float>(point_w);
+                out.at<float>(i, 5) = static_cast<float>(point_h);
+                out.at<float>(i, 8) = static_cast<float>(wrap_to_pi(theta));
+                continue;
+            }
+
+            const bool mutually_consistent =
+                geometry_consistent &&
+                std::isfinite(theta_error) &&
+                theta_error <= (0.5 * CV_PI);
+            if (mutually_consistent) {
+                const double quality_sum = original_quality + point_quality;
+                const double original_weight = quality_sum > 1e-8
+                    ? original_quality / quality_sum : 0.5;
+                const double point_weight = 1.0 - original_weight;
+                out.at<float>(i, 0) = static_cast<float>(
+                    original_weight * original_cx + point_weight * point_cx);
+                out.at<float>(i, 1) = static_cast<float>(
+                    original_weight * original_cy + point_weight * point_cy);
+                out.at<float>(i, 2) = static_cast<float>(
+                    original_weight * original_cz + point_weight * point_cz);
+                out.at<float>(i, 3) = static_cast<float>(
+                    original_weight * original_l + point_weight * point_l);
+                out.at<float>(i, 4) = static_cast<float>(
+                    original_weight * original_w + point_weight * point_w);
+                out.at<float>(i, 5) = static_cast<float>(
+                    original_weight * original_h + point_weight * point_h);
+
+                // 角度使用圆周线性融合，避免在 -pi/pi 边界处跳变。
+                const double sin_theta =
+                    original_weight * std::sin(original_theta) +
+                    point_weight * std::sin(theta);
+                const double cos_theta =
+                    original_weight * std::cos(original_theta) +
+                    point_weight * std::cos(theta);
+                out.at<float>(i, 8) = static_cast<float>(
+                    std::atan2(sin_theta, cos_theta));
+            }
+        }
+
+        return fallback;
+    }
+
     // 单个 3D 盒在圆柱图上绘制
     // cuboid: [cx,cy,cz,l,w,h,conf,cls,theta_abs]
     void draw_3dbox_on_cyl_inplace(cv::Mat& img,

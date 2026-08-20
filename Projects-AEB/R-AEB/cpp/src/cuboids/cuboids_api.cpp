@@ -41,6 +41,31 @@ cv::Mat cuboids_ProcRAEB(
     return cuboids;
 }
 
+cv::Mat cuboids_ProcRAEBAnd3D(
+    const cv::Mat& objs,
+    const cv::Mat& points3d,
+    double grounding_z,
+    const cv::Mat& masks
+) {
+    if (!g_3dest_raeb) {
+        throw std::runtime_error("Cyl3DBoxEstimator 未初始化：请先调用 cuboids_InitRAEB(...)");
+    }
+
+    return g_3dest_raeb->cuboids_from_boxesAnd3D(
+        objs, points3d, grounding_z, masks);
+}
+
+cv::Mat cuboids_ProcRAEB3D(
+    const cv::Mat& points3d,
+    double grounding_z
+) {
+    if (!g_3dest_raeb) {
+        throw std::runtime_error("Cyl3DBoxEstimator 未初始化：请先调用 cuboids_InitRAEB(...)");
+    }
+
+    return g_3dest_raeb->cuboids_from_3D(points3d, grounding_z);
+}
+
 // ------------- 3D 盒可视化 -------------
 cv::Mat cuboids_VisCuboids(
     const cv::Mat& cyl_img_ori,

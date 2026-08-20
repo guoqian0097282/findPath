@@ -35,6 +35,32 @@ cv::Mat cuboids_ProcRAEB(
 );
 
 /**
+ * @brief Compute cuboids from 2D detections and eight projected 3D-box corners.
+ *
+ * @param points3d CV_32F/CV_64F (M,18):
+ *                 [p0.x,p0.y,...,p7.x,p7.y,conf,cls].
+ *                 2D and 3D rows are matched by class and projected-box
+ *                 IoU >= 0.70. Unmatched rows are kept from their source.
+ */
+cv::Mat cuboids_ProcRAEBAnd3D(
+    const cv::Mat& objs,
+    const cv::Mat& points3d,
+    double grounding_z,
+    const cv::Mat& masks
+);
+
+/**
+ * @brief Compute cuboids using only 3D projected box points.
+ *
+ * @param points3d CV_32F/CV_64F, shape (M,18):
+ *                 [p0.x,p0.y,...,p7.x,p7.y,conf,cls].
+ */
+cv::Mat cuboids_ProcRAEB3D(
+    const cv::Mat& points3d,
+    double grounding_z
+);
+
+/**
  * @brief Visualize 3D cuboids on cylindrical image.
  *
  * @param cyl_img_ori cv::Mat, CV_8UC3, shape (H, W, 3), BGR.
