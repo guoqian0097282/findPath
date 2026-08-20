@@ -3,6 +3,7 @@
 // 可选：recursive 递归遍历；loop 无限循环跑。
 
 #include <algorithm>
+#include <array>
 #include <any>
 #include <chrono>
 #include <cctype>
@@ -11,8 +12,12 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
+#include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -24,6 +29,8 @@
 
 #include "common/logger.hpp"
 #include "VisPer.h"
+#include "cuboids/cuboids_api.h"
+#include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
 
@@ -31,10 +38,10 @@ namespace fs = std::filesystem;
 static const std::string kTask = "RAEB";
 static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/configFront_M112.jsonc";
 static const std::string kModelPath  = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/TI_lyl.onnx";
-static const fs::path kDefaultInputDir = "/home/gq/guoqian/Projects-AEB/R-AEB/cpp/tests/vis";
+static const fs::path k3dImagePath = "/home/gq/guoqian/Projects-AEB/R-AEB/cpp/tests/vis/20260819-164755.jpg";
+static const fs::path k3dDetectionPath = "/home/gq/guoqian/Projects-AEB/R-AEB/cpp/tests/vis/20260819-164755.txt";
+static const fs::path k3dOutputPath = "/home/gq/guoqian/Projects-AEB/R-AEB/cpp/tests/vis/20260819-164755_3d.jpg";
 static const fs::path kVisDir        = "vis";
-static const fs::path kVis3dVideoMp4Path = kVisDir / "raeb_vis_3d_10fps.mp4";
-static const fs::path kVis3dVideoAviPath = kVisDir / "raeb_vis_3d_10fps.avi";
 static const std::string kVis3dImagePrefix = "raeb_vis_3d_";
 static constexpr double kVis3dVideoFps = 10.0;
 static constexpr std::int64_t kSyntheticStartTimestampMs = 1780392678989LL;
@@ -247,13 +254,7 @@ static std::int64_t now_ms_epoch() {
     ).count();
 }
 
-static fs::path get_input_dir() {
-    const char* env = std::getenv("VISPER_INPUT_DIR");
-    if (env != nullptr && env[0] != '\0') {
-        return fs::path(env);
-    }
-    return kDefaultInputDir;
-}
+
 
 // ---------- BGR -> NV12 ----------
 static std::vector<std::uint8_t> bgr_to_nv12(const cv::Mat& bgr) {
@@ -409,62 +410,6 @@ static std::vector<fs::path> collect_vis3d_images(const fs::path& vis_dir) {
     return images;
 }
 
-static bool build_vis3d_video() {
-    const std::vector<fs::path> frames = collect_vis3d_images(kVisDir);
-    if (frames.empty()) {
-        LOG_WARNING("No 3D visualization images found in: %s", kVisDir.string().c_str());
-        return false;
-    }
-
-    cv::Mat first = cv::imread(frames.front().string(), cv::IMREAD_COLOR);
-    if (first.empty()) {
-        LOG_WARNING("Failed to read first 3D visualization image: %s", frames.front().string().c_str());
-        return false;
-    }
-
-    cv::VideoWriter writer;
-    fs::path video_path = kVis3dVideoMp4Path;
-    int fourcc = cv::VideoWriter::fourcc('m', 'p', '4', 'v');
-    writer.open(video_path.string(), fourcc, kVis3dVideoFps, first.size(), true);
-    if (!writer.isOpened()) {
-        LOG_WARNING("Failed to open MP4 video writer, fallback to AVI: %s",
-                    video_path.string().c_str());
-        video_path = kVis3dVideoAviPath;
-        fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
-        writer.open(video_path.string(), fourcc, kVis3dVideoFps, first.size(), true);
-    }
-    if (!writer.isOpened()) {
-        LOG_WARNING("Failed to open 3D visualization video writer: %s", video_path.string().c_str());
-        return false;
-    }
-
-    std::size_t written = 0;
-    for (const fs::path& frame_path : frames) {
-        cv::Mat frame = cv::imread(frame_path.string(), cv::IMREAD_COLOR);
-        if (frame.empty()) {
-            LOG_WARNING("Skip unreadable 3D visualization image: %s", frame_path.string().c_str());
-            continue;
-        }
-        if (frame.size() != first.size()) {
-            cv::resize(frame, frame, first.size(), 0.0, 0.0, cv::INTER_LINEAR);
-        }
-        writer.write(frame);
-        ++written;
-    }
-    writer.release();
-
-    if (written == 0) {
-        LOG_WARNING("No frames written to 3D visualization video: %s", video_path.string().c_str());
-        return false;
-    }
-
-    std::error_code ec;
-    const std::string abs_video = fs::absolute(video_path, ec).string();
-    LOG_INFO("Save 3D visualization video: %s fps=%.1f frames=%zu",
-             abs_video.c_str(), kVis3dVideoFps, written);
-    return true;
-}
-
 static std::size_t run_once(const std::vector<fs::path>& images) {
     std::size_t ok_count = 0;
     TrackVelMap tracks_vel;
@@ -559,54 +504,121 @@ static std::size_t run_once(const std::vector<fs::path>& images) {
     return ok_count;
 }
 
-int main() {
-    LOG_INFO("Start RAEB NV12 folder unittest");
-    LOG_INFO("Init: task=%s config=%s model=%s",
-             kTask.c_str(), kConfigPath.c_str(), kModelPath.c_str());
+static cv::Mat load_3d_detections(const fs::path& detection_path) {
+    const char* default_detections =
+        "2 0.8 714.000000 269.000000 743.977173 267.000000 "
+        "868.962780 271.000000 871.964029 276.000000 "
+        "714.000000 224.000000 743.977173 223.000000 "
+        "868.962780 221.000000 871.964029 222.000000\n"
+        "2 0.78 628.000000 258.000000 648.000000 258.000000 "
+        "720.974227 262.000000 689.974227 266.000000 "
+        "628.000000 220.000000 648.000000 223.000000 "
+        "720.974227 221.000000 689.974227 219.000000\n"
+        "1 0.8 592.000000 270.000000 592.976624 274.000000 "
+        "525.948691 273.000000 525.972067 270.000000 "
+        "592.000000 206.000000 592.976624 206.000000 "
+        "525.948691 206.000000 525.972067 206.000000\n"
+        "0 0.7 621.000000 259.000000 632.971264 259.000000 "
+        "633.942529 261.000000 620.971264 261.000000 "
+        "621.000000 226.000000 632.971264 226.000000 "
+        "633.942529 226.000000 620.971264 226.000000\n";
 
-    VisPer_InitTask(kTask, kConfigPath, kModelPath);
+    std::ifstream file(detection_path);
+    std::istringstream input;
+    if (file) {
+        input.str(std::string(
+            std::istreambuf_iterator<char>(file),
+            std::istreambuf_iterator<char>()));
+    } else {
+        LOG_WARNING("Detection file not found, use embedded sample: %s",
+                    detection_path.string().c_str());
+        input.str(default_detections);
+    }
 
-    LOG_INFO("Register callback: task=%s", kTask.c_str());
-    VisPer_RegCallback(kTask, RaebCallback);
+    // 输入文件格式：cls conf p0.x p0.y ... p7.x p7.y
+    // cuboids_from_3D 格式：p0.x p0.y ... p7.x p7.y conf cls
+    std::vector<std::array<float, 18>> rows;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty()) continue;
+        std::istringstream line_stream(line);
+        float cls = 0.0f;
+        float conf = 0.0f;
+        std::array<float, 16> points{};
+        bool valid = static_cast<bool>(line_stream >> cls >> conf);
+        for (int j = 0; valid && j < 16; ++j) {
+            if (!(line_stream >> points[j])) {
+                valid = false;
+            }
+        }
+        if (valid) {
+            std::array<float, 18> row{};
+            for (int j = 0; j < 16; ++j) {
+                row[j] = points[j];
+            }
+            row[16] = conf;
+            row[17] = cls;
+            rows.push_back(row);
+        }
+    }
 
-    const fs::path input_dir = get_input_dir();
+    cv::Mat detections(static_cast<int>(rows.size()), 18, CV_32F);
+    for (int i = 0; i < detections.rows; ++i) {
+        for (int j = 0; j < 18; ++j) {
+            detections.at<float>(i, j) = rows[i][j];
+        }
+    }
+    return detections;
+}
 
-    auto images = collect_images(input_dir, kRecursive);
-    if (images.empty()) {
-        LOG_ERROR("No images found in: %s", input_dir.string().c_str());
-        VisPer_CleanUp(); // 清理后台线程
+static int run_single_3d_case() {
+    cv::Mat image = cv::imread(k3dImagePath.string(), cv::IMREAD_COLOR);
+    if (image.empty()) {
+        LOG_ERROR("Failed to read 3D test image: %s", k3dImagePath.string().c_str());
         return 2;
     }
 
-    LOG_INFO("Found %zu images in %s (recursive=%d loop=%d)",
-             images.size(),
-             input_dir.string().c_str(),
-             kRecursive ? 1 : 0,
-             kLoop ? 1 : 0);
-
-    if (kLoop) {
-        std::int64_t round = 0;
-        while (true) {
-            LOG_INFO("===== round=%lld start =====", (long long)round);
-            std::size_t ok = run_once(images);
-            LOG_INFO("===== round=%lld done: ok=%zu/%zu =====",
-                     (long long)round, ok, images.size());
-            ++round;
-        }
-        // 如果以后改成可退出循环，记得在退出前调用 VisPer_CleanUp()
-        // VisPer_CleanUp();
-        // return 0;
-    } else {
-        std::size_t ok = run_once(images);
-        if (ok == 0) {
-            LOG_ERROR("No successful results generated.");
-            VisPer_CleanUp(); // 清理后台线程
-            return 3;
-        }
-        LOG_INFO("Done: ok=%zu/%zu", ok, images.size());
+    std::ifstream config_file(kConfigPath);
+    if (!config_file) {
+        LOG_ERROR("Failed to open cuboid config: %s", kConfigPath.c_str());
+        return 3;
     }
-    
-    VisPer_CleanUp(); // 正常结束清理后台线程
-    (void)build_vis3d_video();
+    const nlohmann::json config =
+        nlohmann::json::parse(config_file, nullptr, true, true);
+    cuboids_InitRAEB(
+        config.at("model").at("whitelist").get<nlohmann::json::object_t>(),
+        config.at("cyl").get<nlohmann::json::object_t>());
+
+    const cv::Mat detections = load_3d_detections(k3dDetectionPath);
+    if (detections.empty()) {
+        LOG_ERROR("No valid 3D detections found");
+        return 4;
+    }
+
+    // 与 2D 流程一致：解算 cuboids 后进行圆柱图可视化。
+    const double grounding_z = 0.0;
+    const cv::Mat cuboids = cuboids_ProcRAEB3D(detections, grounding_z);
+    const cv::Mat output = cuboids_VisCuboids(image, cuboids, nullptr, true);
+    if (!cv::imwrite(k3dOutputPath.string(), output)) {
+        LOG_ERROR("Failed to save 3D result: %s", k3dOutputPath.string().c_str());
+        return 5;
+    }
+
+    LOG_INFO("3D cuboids=%d, save visualization: %s",
+             cuboids.rows, k3dOutputPath.string().c_str());
+    for (int i = 0; i < cuboids.rows; ++i) {
+        LOG_INFO("cuboid[%d]=[%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.0f %.3f]",
+                 i,
+                 cuboids.at<float>(i, 0), cuboids.at<float>(i, 1),
+                 cuboids.at<float>(i, 2), cuboids.at<float>(i, 3),
+                 cuboids.at<float>(i, 4), cuboids.at<float>(i, 5),
+                 cuboids.at<float>(i, 6), cuboids.at<float>(i, 7),
+                 cuboids.at<float>(i, 8));
+    }
     return 0;
+}
+
+int main() {
+    LOG_INFO("Start single-frame 3D cuboid test");
+    return run_single_3d_case();
 }
