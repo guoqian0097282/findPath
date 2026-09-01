@@ -1115,7 +1115,222 @@ public:
         return draw_angleins(img, objs7, masks, &txts, draw_mask, draw_bbox, draw_angle);
     }
 
-private:
+    // 绘制3D边界框的主函数
+    cv::Mat draw_3Dbounding(
+        const cv::Mat& img_bgr,     // H×W×3 CV_8UC3 原始图像
+        const cv::Mat& detections   // N×18 CV_32F 检测结果
+    ) {
+        // 检查输入
+        if (detections.empty() || detections.cols != 18 || detections.type() != CV_32FC1) {
+            std::cerr << "Error: detections must be N×18 CV_32FC1" << std::endl;
+            return img_bgr.clone();
+        }
+        
+        // 复制图像以便绘制
+        cv::Mat out = img_bgr.clone();
+        const int H = out.rows;
+        const int W = out.cols;
+        const int N = detections.rows;
+        
+        // 按置信度排序（从高到低）
+        std::vector<int> order(N);
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+            return detections.at<float>(a, 16) > detections.at<float>(b, 16);  // 置信度降序
+        });
+        
+        // 遍历每个检测结果
+        for (int idx : order) {
+            // 读取8个点的坐标 (p0-p7)
+            std::vector<cv::Point2f> points(8);
+            for (int i = 0; i < 8; i++) {
+                points[i].x = detections.at<float>(idx, i * 2);
+                points[i].y = detections.at<float>(idx, i * 2 + 1);
+            }
+            
+            // 地面四个点：p0, p1, p2, p3 (左前, 右前, 右后, 左后)
+            cv::Point2f p0 = points[0];  // 地面左前方
+            cv::Point2f p1 = points[1];  // 地面右前方
+            cv::Point2f p2 = points[2];  // 地面右后方
+            cv::Point2f p3 = points[3];  // 地面左后方
+            
+            // 顶部四个点：p4, p5, p6, p7 (对应地面点的上方)
+            cv::Point2f p4 = points[4];  // 顶部左前方
+            cv::Point2f p5 = points[5];  // 顶部右前方
+            cv::Point2f p6 = points[6];  // 顶部右后方
+            cv::Point2f p7 = points[7];  // 顶部左后方
+            
+            // 读取置信度和类别
+            float confidence = detections.at<float>(idx, 16);
+            int class_id = (int)std::lround(detections.at<float>(idx, 17));
+            
+            // 获取颜色
+            cv::Scalar color = color_for_cls(class_id);
+            cv::Scalar color_dim = color * 0.5;  // 用于背面线条的暗淡颜色
+            
+            // 确保坐标在图像范围内
+            auto clamp_point = [&](cv::Point2f& pt) {
+                pt.x = std::clamp(pt.x, 0.0f, (float)(W - 1));
+                pt.y = std::clamp(pt.y, 0.0f, (float)(H - 1));
+            };
+            
+            // 对所有点进行裁剪
+            for (auto& pt : points) {
+                clamp_point(pt);
+            }
+            
+            // 重新赋值裁剪后的点
+            p0 = points[0]; p1 = points[1]; p2 = points[2]; p3 = points[3];
+            p4 = points[4]; p5 = points[5]; p6 = points[6]; p7 = points[7];
+            
+            // ========== 绘制3D边界框 ==========
+            
+            // 绘制地面矩形（四边形）
+            std::vector<cv::Point> ground_pts = {
+                cv::Point((int)std::lround(p0.x), (int)std::lround(p0.y)),
+                cv::Point((int)std::lround(p1.x), (int)std::lround(p1.y)),
+                cv::Point((int)std::lround(p2.x), (int)std::lround(p2.y)),
+                cv::Point((int)std::lround(p3.x), (int)std::lround(p3.y))
+            };
+            cv::polylines(out, ground_pts, true, color, 2, cv::LINE_AA);
+            
+            // 绘制顶部矩形（四边形）
+            std::vector<cv::Point> top_pts = {
+                cv::Point((int)std::lround(p4.x), (int)std::lround(p4.y)),
+                cv::Point((int)std::lround(p5.x), (int)std::lround(p5.y)),
+                cv::Point((int)std::lround(p6.x), (int)std::lround(p6.y)),
+                cv::Point((int)std::lround(p7.x), (int)std::lround(p7.y))
+            };
+            cv::polylines(out, top_pts, true, color, 2, cv::LINE_AA);
+            
+            // 绘制垂直连接线（4条竖边）
+            std::vector<std::pair<cv::Point2f, cv::Point2f>> vertical_edges = {
+                {p0, p4}, {p1, p5}, {p2, p6}, {p3, p7}
+            };
+            for (const auto& edge : vertical_edges) {
+                cv::line(out, 
+                        cv::Point((int)std::lround(edge.first.x), (int)std::lround(edge.first.y)),
+                        cv::Point((int)std::lround(edge.second.x), (int)std::lround(edge.second.y)),
+                        color, 2, cv::LINE_AA);
+            }
+            
+            // 绘制对角线（为了增强3D效果）
+            // 地面对角线
+            cv::line(out, 
+                    cv::Point((int)std::lround(p0.x), (int)std::lround(p0.y)),
+                    cv::Point((int)std::lround(p2.x), (int)std::lround(p2.y)),
+                    color_dim, 1, cv::LINE_AA);
+            cv::line(out, 
+                    cv::Point((int)std::lround(p1.x), (int)std::lround(p1.y)),
+                    cv::Point((int)std::lround(p3.x), (int)std::lround(p3.y)),
+                    color_dim, 1, cv::LINE_AA);
+            
+            // 顶部对角线
+            cv::line(out, 
+                    cv::Point((int)std::lround(p4.x), (int)std::lround(p4.y)),
+                    cv::Point((int)std::lround(p6.x), (int)std::lround(p6.y)),
+                    color_dim, 1, cv::LINE_AA);
+            cv::line(out, 
+                    cv::Point((int)std::lround(p5.x), (int)std::lround(p5.y)),
+                    cv::Point((int)std::lround(p7.x), (int)std::lround(p7.y)),
+                    color_dim, 1, cv::LINE_AA);
+            
+            // ========== 标识p0-p7点 ==========
+            
+            // 点的标签名称
+            std::vector<std::string> point_names = {"p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"};
+            
+            // 每个点的颜色（使用不同颜色以便区分）
+            std::vector<cv::Scalar> point_colors = {
+                {0, 0, 255},     // p0: 红色
+                {0, 255, 0},     // p1: 绿色
+                {255, 0, 0},     // p2: 蓝色
+                {0, 255, 255},   // p3: 黄色
+                {255, 0, 255},   // p4: 品红
+                {255, 255, 0},   // p5: 青色
+                {128, 0, 128},   // p6: 紫色
+                {128, 128, 0}    // p7: 橄榄色
+            };
+            
+            // 绘制每个点
+            for (int i = 0; i < 8; i++) {
+                cv::Point pt((int)std::lround(points[i].x), (int)std::lround(points[i].y));
+                
+                // 绘制大圆点
+                cv::circle(out, pt, 5, point_colors[i], -1);  // 填充圆
+                cv::circle(out, pt, 5, cv::Scalar(255, 255, 255), 1);  // 白色边框
+                
+                // 绘制标签（带背景）
+                std::string label = point_names[i];
+                int baseline = 0;
+                cv::Size text_size = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+                
+                // 计算标签位置（在点的右上方）
+                cv::Point label_pos(pt.x + 8, pt.y - 8);
+                
+                // 确保标签在图像内
+                label_pos.x = std::clamp(label_pos.x, 5, W - text_size.width - 5);
+                label_pos.y = std::clamp(label_pos.y, text_size.height + 5, H - 5);
+                
+                // 绘制半透明背景
+                cv::Rect bg_rect(label_pos.x - 2, label_pos.y - text_size.height - 2, 
+                                text_size.width + 4, text_size.height + baseline + 4);
+                bg_rect.x = std::clamp(bg_rect.x, 0, W - bg_rect.width);
+                bg_rect.y = std::clamp(bg_rect.y, 0, H - bg_rect.height);
+                
+                cv::Mat roi = out(bg_rect);
+                roi = roi * 0.6;  // 降低亮度作为背景
+                
+                // 绘制文本
+                cv::putText(out, label, 
+                            cv::Point(label_pos.x, label_pos.y + baseline),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.5, 
+                            point_colors[i], 2, cv::LINE_AA);
+            }
+            
+            // ========== 绘制类别和置信度标签 ==========
+            
+            std::string label = "Class " + std::to_string(class_id) + 
+                            " " + std::to_string(confidence).substr(0, 5);
+            
+            // 计算标签位置（在物体上方中心）
+            cv::Point2f top_center = (p4 + p5 + p6 + p7) * 0.25f;
+            cv::Point label_pos((int)std::lround(top_center.x), 
+                            (int)std::lround(top_center.y) - 20);
+            
+            // 确保标签位置在图像内
+            label_pos.x = std::clamp(label_pos.x, 10, W - 10);
+            label_pos.y = std::clamp(label_pos.y, 20, H - 10);
+            
+            // 绘制文本背景
+            int baseline = 0;
+            cv::Size text_size = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.6, 2, &baseline);
+            cv::Rect bg_rect(label_pos.x - 8, label_pos.y - text_size.height - 8, 
+                            text_size.width + 16, text_size.height + baseline + 16);
+            bg_rect.x = std::clamp(bg_rect.x, 0, W - bg_rect.width);
+            bg_rect.y = std::clamp(bg_rect.y, 0, H - bg_rect.height);
+            
+            cv::rectangle(out, bg_rect, color * 0.3, -1);
+            cv::rectangle(out, bg_rect, color, 2);
+            
+            // 绘制文本
+            cv::putText(out, label, 
+                        cv::Point(label_pos.x, label_pos.y + baseline + 4),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.6, 
+                        cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+            
+            // 添加图例说明（可选）
+            std::string legend = "p0:left-front, p1:right-front, p2:right-back, p3:left-back";
+            cv::putText(out, legend, 
+                        cv::Point(10, H - 10),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.4, 
+                        cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+        }
+        
+        return out;
+    }  
+
+    private:
     static std::string merge_target_name(const std::string& name)
     {
         static constexpr const char* kPrefix = "fake ";

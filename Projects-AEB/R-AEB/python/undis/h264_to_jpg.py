@@ -80,7 +80,7 @@ if __name__ == "__main__":
     
     # 方式2：提取所有帧
     h264_to_jpg_opencv(
-        video_path="/home/gq/guoqian/Projects-AEB/M112/260817/General_rear/VID_20260101_000417_GEN_2.h264",
-        output_dir="./images_rear",
+        video_path="/home/gq/guoqian/Projects-AEB/M112/260825/data/VID_20260101_022909_GEN_2.h264",
+        output_dir="/home/gq/guoqian/Projects-AEB/M112/260825/data/5",
         extract_interval=10
     )

@@ -8,7 +8,7 @@
             "name": "(gdb) Launch",
             "type": "cppdbg",
             "request": "launch",
-            "program": "/home/gq/guoqian/Projects-AEB/R-AEB/cpp/cmake-build-release-x86/tests/TEST_visper_x86", // 这一行的配置项非常重要
+            "program": "/home/gq/guoqian/Projects-AEB/R-AEB/cpp/cmake-build-release-x86/tests/TEST_visper_x863D", // 这一行的配置项非常重要
             "args": [],
                     //  "/home/gq/guoqian/data/catHorn/20230313/undistort_image"],
 

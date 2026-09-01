@@ -726,6 +726,8 @@ public:
     // corners. This method does not require a 2D detection input.
     cv::Mat cuboids_from_3D(const cv::Mat& points3d,
                             double z_world) const {
+        // z_world = 0.2;
+        bool just_use_3d = false;
         CV_Assert(points3d.empty() ||
                   (points3d.channels() == 1 &&
                    points3d.cols == 18 &&
@@ -760,6 +762,47 @@ public:
                 return cv::Vec2d(points3d.at<double>(i, col),
                                  points3d.at<double>(i, col + 1));
             };
+
+
+        if (just_use_3d) {
+            const int n3d = points3d.rows;
+            cv::Mat synthetic_objs(n3d, 7, CV_32F, cv::Scalar(0));
+            cv::Mat point16(n3d, 16, CV_32F);
+            for (int i = 0; i < n3d; ++i) {
+                double min_u = std::numeric_limits<double>::infinity();
+                double max_u = -std::numeric_limits<double>::infinity();
+                double min_v = std::numeric_limits<double>::infinity();
+                double max_v = -std::numeric_limits<double>::infinity();
+                for (int k = 0; k < 16; k += 2) {
+                    const double u = points3d.type() == CV_32F
+                        ? points3d.at<float>(i, k)
+                        : points3d.at<double>(i, k);
+                    const double v = points3d.type() == CV_32F
+                        ? points3d.at<float>(i, k + 1)
+                        : points3d.at<double>(i, k + 1);
+                    point16.at<float>(i, k) = static_cast<float>(u);
+                    point16.at<float>(i, k + 1) = static_cast<float>(v);
+                    min_u = std::min(min_u, u);
+                    max_u = std::max(max_u, u);
+                    min_v = std::min(min_v, v);
+                    max_v = std::max(max_v, v);
+                }
+                synthetic_objs.at<float>(i, 0) = static_cast<float>(min_u);
+                synthetic_objs.at<float>(i, 1) = static_cast<float>(min_v);
+                synthetic_objs.at<float>(i, 2) = static_cast<float>(max_u);
+                synthetic_objs.at<float>(i, 3) = static_cast<float>(max_v);
+                synthetic_objs.at<float>(i, 4) = points3d.type() == CV_32F
+                    ? points3d.at<float>(i, 16)
+                    : static_cast<float>(points3d.at<double>(i, 16));
+                synthetic_objs.at<float>(i, 5) = points3d.type() == CV_32F
+                    ? points3d.at<float>(i, 17)
+                    : static_cast<float>(points3d.at<double>(i, 17));
+            }
+            return cuboids_from_boxesAnd3DAligned(
+                synthetic_objs, point16, z_world, cv::Mat());
+        }
+
+
 
             // 第二路观测：由有效 3D 投影点生成伪 2D 框，复用原始 solver。
             cv::Mat pseudo_obj(1, 7, CV_32F, cv::Scalar(0));
@@ -960,6 +1003,7 @@ public:
                     const double direct_weight =
                         direct_quality / (direct_quality + pseudo_quality);
                     const double pseudo_weight = 1.0 - direct_weight;
+                    // std::cout<<"ratio: "<<direct_weight<<", "<<pseudo_weight<<std::endl;
                     for (int k = 0; k < 6; ++k) {
                         cuboids.at<float>(i, k) = static_cast<float>(
                             direct_weight * cuboids.at<float>(i, k) +

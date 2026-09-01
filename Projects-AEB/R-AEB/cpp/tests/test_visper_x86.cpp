@@ -29,9 +29,9 @@ namespace fs = std::filesystem;
 
 // ---------- 常量配置（按你项目实际改路径） ----------
 static const std::string kTask = "RAEB";
-static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/configFront_M112.jsonc";
+static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/configRear_M112.jsonc";
 static const std::string kModelPath  = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/TI_lyl.onnx";
-static const fs::path kDefaultInputDir = "/home/gq/guoqian/Projects-AEB/R-AEB/cpp/tests/vis";
+static const fs::path kDefaultInputDir = "/home/gq/guoqian/Projects-AEB/R-AEB/python/undis/out";
 static const fs::path kVisDir        = "vis";
 static const fs::path kVis3dVideoMp4Path = kVisDir / "raeb_vis_3d_10fps.mp4";
 static const fs::path kVis3dVideoAviPath = kVisDir / "raeb_vis_3d_10fps.avi";

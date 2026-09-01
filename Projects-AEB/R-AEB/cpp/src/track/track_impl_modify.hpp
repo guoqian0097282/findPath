@@ -15,10 +15,26 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <deque>
 
 #include <opencv2/core.hpp>
 
 #include "track_utils/matching.hpp"
+
+// 在 CuboidTracker 类定义之前添加
+struct DirectionSmoothParams {
+    float max_movement_per_frame = 0.8f;      // 单帧最大位移 (m)
+    float position_smooth_alpha = 0.4f;       // 位置EMA平滑系数
+    int direction_median_window = 7;          // 方向中值窗口大小
+    float direction_angle_threshold = 0.3f;   // 方向偏差阈值 (rad)
+    float still_speed_threshold = 0.3f;       // 静止速度阈值 (m/s)
+    float slow_speed_threshold = 1.0f;        // 慢速速度阈值 (m/s)
+    int max_dir_history = 10;                 // 方向历史长度
+    float stable_dir_threshold = 0.85f;       // 方向稳定阈值
+    float min_speed_for_direction = 0.3f;     // 方向有效最小速度
+    float measurement_jump_limit = 0.8f;      // 测量跳变限幅 (m)
+};
+
 
 namespace cuboid_tracker_impl {
 
@@ -64,6 +80,34 @@ struct CuboidTrack {
     int age() const {
         return frame_id - start_frame + 1;
     }
+    // ===== 方向平滑新增 =====
+    // 位置历史 (x, y, timestamp)
+    std::deque<std::tuple<float, float, std::int64_t>> pos_history;
+    int max_history = 5;
+    
+    // 平滑位置
+    float smooth_pos_x = 0.0f;
+    float smooth_pos_y = 0.0f;
+    bool has_smooth_pos = false;
+    
+    // 方向历史 (cos, sin)
+    std::deque<std::pair<float, float>> dir_history;
+    
+    // 稳定方向
+    float stable_dir_x = 1.0f;
+    float stable_dir_y = 0.0f;
+    int dir_stable_count = 0;
+    
+    // 角度历史（中值滤波）
+    std::deque<float> angle_history;
+    
+    // 慢速平滑状态
+    float slow_vx = 0.0f;
+    float slow_vy = 0.0f;
+    int still_counter = 0;
+    
+    // 速度置信度
+    float last_confidence = 1.0f;
 };
 
 class CuboidTracker {
@@ -129,7 +173,14 @@ public:
         double ego_yaw = 0.0,
         const std::string& mode = "ego"
     );
+    // 新增：设置方向平滑参数
+    void setDirectionSmoothParams(const DirectionSmoothParams& params);
+    const DirectionSmoothParams& getDirectionSmoothParams() const;
 
+    // 新增：内存优化方法
+    void reserveMemory(int max_tracks);
+    void trimMemory();
+    size_t getMemoryUsage() const;
     std::tuple<cv::Mat, cv::Mat> update(std::int64_t timestamp, const cv::Mat& cuboids);
 
 private:
@@ -293,6 +344,65 @@ private:
     int mode_id_world_ = 1;
 
     double large_cost_ = 1e6;
+    // ===== 方向平滑方法 =====
+    cv::Point2f stabilizeMeasurementPosition(
+        TrackPtr& trk,
+        const cv::Point2f& z,
+        float max_movement = 0.8f);
+    
+    cv::Point2f smoothMeasurementPosition(
+        TrackPtr& trk,
+        const cv::Point2f& z,
+        float alpha = 0.4f);
+    
+    cv::Point2f preprocessMeasurement(
+        TrackPtr& trk,
+        const cv::Point2f& z);
+
+    cv::Point2f computeVelocityFromHistoryWeighted(
+        const std::deque<std::tuple<float, float, std::int64_t>>& pos_history,
+        float decay_factor = 0.8f);
+    
+    cv::Point2f computeSmoothVelocity(
+        TrackPtr& trk,
+        const cv::Point2f& z,
+        std::int64_t timestamp);
+    
+    cv::Point2f smoothDirection(TrackPtr& trk, float vx, float vy);
+    cv::Point2f medianFilterDirection(TrackPtr& trk, float vx, float vy);
+    
+    int classifyVelocityState(const TrackPtr& trk, float speed) const;
+    cv::Point2f applyVelocitySmoothingStrategy(
+        TrackPtr& trk,
+        float raw_vx,
+        float raw_vy);
+    
+    float computeVelocityConfidence(const TrackPtr& trk, float vx, float vy) const;
+    cv::Point2f weightedVelocityOutput(
+        TrackPtr& trk,
+        float kf_vx,
+        float kf_vy,
+        float meas_vx,
+        float meas_vy);
+    
+    float angleDiff(float a, float b) const;
+    void clipVelocity(float& vx, float& vy, float max_speed) const;
+
+    // ===== 内存优化相关 =====
+    // 预分配的对象池
+    std::vector<TrackPtr> track_pool_;
+    std::unordered_set<int> track_id_pool_;
+    
+    // 内存统计
+    struct MemoryStats {
+        size_t active_tracks = 0;
+        size_t lost_tracks = 0;
+        size_t removed_tracks = 0;
+        size_t history_bytes = 0;
+    } mem_stats_;
+
+    // 方向平滑参数
+    DirectionSmoothParams dir_params_;
 };
 
 inline CuboidTracker::CuboidTracker(
@@ -404,6 +514,20 @@ inline CuboidTracker::CuboidTracker(
     turn_recover_min_speed_ = std::max(0.0, static_cast<double>(turn_recover_min_speed));
     turn_recover_comp_freeze_ = std::max(0, turn_recover_comp_freeze);
 
+    // 初始化方向平滑参数（默认值）
+    dir_params_.max_movement_per_frame = 0.8f;
+    dir_params_.position_smooth_alpha = 0.4f;
+    dir_params_.direction_median_window = 7;
+    dir_params_.direction_angle_threshold = 0.3f;
+    dir_params_.still_speed_threshold = 0.3f;
+    dir_params_.slow_speed_threshold = 1.0f;
+    dir_params_.max_dir_history = 10;
+    dir_params_.stable_dir_threshold = 0.85f;
+    dir_params_.min_speed_for_direction = 0.3f;
+    dir_params_.measurement_jump_limit = 0.8f;
+
+    // 预分配内存
+    reserveMemory(100);
     reset();
 }
 
@@ -930,6 +1054,7 @@ inline cv::Mat CuboidTracker::build_cost(
             const double norm = std::max(1e-3, 0.5 * (tdiag + ddiag));
             const double center_cost = clip(dist / (norm * 2.0), 0.0, 1.5);
             const double cls_cost = 0.0;
+            // double weight = (tcls == 1) ? 0.5 : 1.0;
             const double sz_cost = size_cost(trk->cuboid, det);
 
             const double c = (w_cls * cls_cost + w_center * center_cost + w_size * sz_cost) / ws;
@@ -964,6 +1089,12 @@ inline CuboidTracker::TrackPtr CuboidTracker::activate(const cv::Vec<float, 9>& 
     trk->frame_id = frame_id_;
     trk->idx = det_idx;
     trk->last_timestamp = timestamp;
+    trk->max_history = 5;
+    
+    // 预分配历史缓冲区
+    trk->pos_history.clear();
+    trk->dir_history.clear();
+    trk->angle_history.clear();
     init_kf_state(static_cast<double>(det[0]), static_cast<double>(det[1]), trk->x, trk->P);
     trk->last_meas_x = det[0];
     trk->last_meas_y = det[1];
@@ -981,6 +1112,18 @@ inline CuboidTracker::TrackPtr CuboidTracker::activate(const cv::Vec<float, 9>& 
     trk->stable_cnt = 0;
     trk->missed = 0;
     trk->hits = 1;
+
+    // 方向平滑初始化
+    trk->smooth_pos_x = det[0];
+    trk->smooth_pos_y = det[1];
+    trk->has_smooth_pos = true;
+    trk->stable_dir_x = 1.0f;
+    trk->stable_dir_y = 0.0f;
+    trk->dir_stable_count = 0;
+    trk->slow_vx = 0.0f;
+    trk->slow_vy = 0.0f;
+    trk->still_counter = 0;
+    trk->last_confidence = 1.0f;
     return trk;
 }
 
@@ -1004,7 +1147,23 @@ inline void CuboidTracker::update_track(
         trk->maneuver_left -= 1;
     }
 
-    cv::Matx<double, 2, 1> z(static_cast<double>(det[0]), static_cast<double>(det[1]));
+    // cv::Matx<double, 2, 1> z(static_cast<double>(det[0]), static_cast<double>(det[1]));
+    // ===== 修改：位置预处理 =====
+    cv::Point2f z_raw(det[0], det[1]);
+    cv::Point2f z_smooth = const_cast<CuboidTracker*>(this)->preprocessMeasurement(
+        const_cast<TrackPtr&>(trk), z_raw);
+    
+    cv::Matx<double, 2, 1> z(z_smooth.x, z_smooth.y);
+    // ===== 修改：多帧速度计算 =====
+    cv::Point2f meas_vel = const_cast<CuboidTracker*>(this)->computeSmoothVelocity(
+        const_cast<TrackPtr&>(trk), z_smooth, timestamp);
+    bool has_meas_velocity = (std::hypot(meas_vel.x, meas_vel.y) > 0.01f);
+
+    // ===== 修改：速度方向平滑 =====
+    if (has_meas_velocity) {
+        meas_vel = const_cast<CuboidTracker*>(this)->applyVelocitySmoothingStrategy(
+            const_cast<TrackPtr&>(trk), meas_vel.x, meas_vel.y);
+    }
     const double dx = z(0, 0) - x_pre(0, 0);
     const double dy = z(1, 0) - x_pre(1, 0);
     const double innov = std::hypot(dx, dy);
@@ -1014,10 +1173,9 @@ inline void CuboidTracker::update_track(
         z(1, 0) = x_pre(1, 0) + dy * scale;
     }
 
-    bool has_meas_velocity = false;
-    double vmx = 0.0;
-    double vmy = 0.0;
-    if (trk->last_meas_valid && dt > min_effective_dt_sec_) {
+    double vmx = meas_vel.x;
+    double vmy = meas_vel.y;
+    if (!has_meas_velocity && trk->last_meas_valid && dt > min_effective_dt_sec_) {
         vmx = (z(0, 0) - trk->last_meas_x) / dt;
         vmy = (z(1, 0) - trk->last_meas_y) / dt;
         std::tie(vmx, vmy) = clip_vel(vmx, vmy);
@@ -1031,6 +1189,16 @@ inline void CuboidTracker::update_track(
     kf_update(x_pre, P_pre, z, x_post, P_post);
     x_post = blend_measured_velocity(trk, x_post, z, dt, innov_used);
     x_post = clip_speed(x_post);
+    // ===== 修改：使用置信度加权速度融合 =====
+    if (has_meas_velocity) {
+        cv::Point2f fused_vel = const_cast<CuboidTracker*>(this)->weightedVelocityOutput(
+            const_cast<TrackPtr&>(trk),
+            static_cast<float>(x_post(2, 0)),
+            static_cast<float>(x_post(3, 0)),
+            meas_vel.x, meas_vel.y);
+        x_post(2, 0) = fused_vel.x;
+        x_post(3, 0) = fused_vel.y;
+    }
 
     double kf_vx = x_post(2, 0);
     double kf_vy = x_post(3, 0);
@@ -1531,6 +1699,438 @@ inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_
 inline int CuboidTracker::next_id() {
     track_count_ += 1;
     return track_count_;
+}
+
+// ===== 方向平滑方法 =====
+cv::Point2f CuboidTracker::stabilizeMeasurementPosition(
+    TrackPtr& trk,
+    const cv::Point2f& z,
+    float max_movement)
+{
+    if (!trk->last_meas_valid) {
+        return z;
+    }
+
+    float dx = z.x - static_cast<float>(trk->last_meas_x);
+    float dy = z.y - static_cast<float>(trk->last_meas_y);
+    float dist = std::hypot(dx, dy);
+
+    if (dist > max_movement) {
+        float scale = max_movement / dist;
+        return cv::Point2f(
+            static_cast<float>(trk->last_meas_x) + dx * scale,
+            static_cast<float>(trk->last_meas_y) + dy * scale
+        );
+    }
+    return z;
+}
+
+cv::Point2f CuboidTracker::smoothMeasurementPosition(
+    TrackPtr& trk,
+    const cv::Point2f& z,
+    float alpha)
+{
+    if (!trk->has_smooth_pos) {
+        trk->smooth_pos_x = z.x;
+        trk->smooth_pos_y = z.y;
+        trk->has_smooth_pos = true;
+        return z;
+    }
+
+    trk->smooth_pos_x = alpha * z.x + (1.0f - alpha) * trk->smooth_pos_x;
+    trk->smooth_pos_y = alpha * z.y + (1.0f - alpha) * trk->smooth_pos_y;
+    return cv::Point2f(trk->smooth_pos_x, trk->smooth_pos_y);
+}
+
+cv::Point2f CuboidTracker::preprocessMeasurement(
+    TrackPtr& trk,
+    const cv::Point2f& z)
+{
+    cv::Point2f z_out = z;
+    z_out = stabilizeMeasurementPosition(trk, z_out, dir_params_.measurement_jump_limit);
+    z_out = smoothMeasurementPosition(trk, z_out, dir_params_.position_smooth_alpha);
+    return z_out;
+}
+
+cv::Point2f CuboidTracker::computeVelocityFromHistoryWeighted(
+    const std::deque<std::tuple<float, float, std::int64_t>>& pos_history,
+    float decay_factor)
+{
+    if (pos_history.size() < 2) {
+        return cv::Point2f(0.0f, 0.0f);
+    }
+
+    const size_t n = pos_history.size();
+    std::vector<float> times(n), xs(n), ys(n), weights(n);
+    
+    const std::int64_t t0 = std::get<2>(pos_history[0]);
+    float total_weight = 0.0f;
+
+    for (size_t i = 0; i < n; ++i) {
+        times[i] = static_cast<float>(std::get<2>(pos_history[i]) - t0);
+        xs[i] = std::get<0>(pos_history[i]);
+        ys[i] = std::get<1>(pos_history[i]);
+        weights[i] = std::pow(decay_factor, static_cast<float>(n - 1 - i));
+        total_weight += weights[i];
+    }
+
+    // 归一化权重
+    for (auto& w : weights) {
+        w /= total_weight;
+    }
+
+    // 加权最小二乘拟合：x = vx * t + bx
+    float sum_tw = 0.0f, sum_xw = 0.0f, sum_yw = 0.0f;
+    float sum_t2w = 0.0f, sum_txw = 0.0f, sum_tyw = 0.0f;
+
+    for (size_t i = 0; i < n; ++i) {
+        const float w = weights[i];
+        sum_tw += times[i] * w;
+        sum_xw += xs[i] * w;
+        sum_yw += ys[i] * w;
+        sum_t2w += times[i] * times[i] * w;
+        sum_txw += times[i] * xs[i] * w;
+        sum_tyw += times[i] * ys[i] * w;
+    }
+
+    const float denom = sum_t2w - sum_tw * sum_tw;
+    if (std::abs(denom) < 1e-6f) {
+        return cv::Point2f(0.0f, 0.0f);
+    }
+
+    const float vx = (sum_txw - sum_tw * sum_xw) / denom;
+    const float vy = (sum_tyw - sum_tw * sum_yw) / denom;
+    return cv::Point2f(vx, vy);
+}
+
+cv::Point2f CuboidTracker::computeSmoothVelocity(
+    TrackPtr& trk,
+    const cv::Point2f& z,
+    std::int64_t timestamp)
+{
+    // 更新位置历史
+    trk->pos_history.push_back(std::make_tuple(z.x, z.y, timestamp));
+    if (trk->pos_history.size() > static_cast<size_t>(trk->max_history)) {
+        trk->pos_history.pop_front();
+    }
+
+    // 使用历史拟合速度
+    if (trk->pos_history.size() >= 3) {
+        cv::Point2f vel = computeVelocityFromHistoryWeighted(trk->pos_history, 0.8f);
+        const float speed = std::hypot(vel.x, vel.y);
+        if (speed < 20.0f && std::isfinite(speed)) {
+            return vel;
+        }
+    }
+
+    // Fallback: 单帧差分
+    if (trk->last_meas_valid) {
+        const float dt = static_cast<float>(compute_dt(timestamp, trk->last_timestamp));
+        if (dt > 0.005f) {
+            float vx = (z.x - static_cast<float>(trk->last_meas_x)) / dt;
+            float vy = (z.y - static_cast<float>(trk->last_meas_y)) / dt;
+            clipVelocity(vx, vy, 20.0f);
+            return cv::Point2f(vx, vy);
+        }
+    }
+
+    return cv::Point2f(0.0f, 0.0f);
+}
+
+float CuboidTracker::angleDiff(float a, float b) const
+{
+    float diff = a - b;
+    while (diff > M_PI) diff -= 2.0f * M_PI;
+    while (diff < -M_PI) diff += 2.0f * M_PI;
+    return diff;
+}
+
+cv::Point2f CuboidTracker::medianFilterDirection(
+    TrackPtr& trk,
+    float vx,
+    float vy)
+{
+    const float speed = std::hypot(vx, vy);
+    if (speed < dir_params_.min_speed_for_direction) {
+        return cv::Point2f(vx, vy);
+    }
+
+    const float angle = std::atan2(vy, vx);
+    trk->angle_history.push_back(angle);
+    if (trk->angle_history.size() > static_cast<size_t>(dir_params_.direction_median_window)) {
+        trk->angle_history.pop_front();
+    }
+
+    if (trk->angle_history.size() >= 3) {
+        // 复制到vector并排序找中值
+        std::vector<float> angles(trk->angle_history.begin(), trk->angle_history.end());
+        std::nth_element(angles.begin(), angles.begin() + angles.size() / 2, angles.end());
+        const float median_angle = angles[angles.size() / 2];
+
+        const float diff = angleDiff(angle, median_angle);
+        if (std::abs(diff) > dir_params_.direction_angle_threshold) {
+            return cv::Point2f(std::cos(median_angle) * speed, std::sin(median_angle) * speed);
+        }
+    }
+
+    return cv::Point2f(vx, vy);
+}
+
+cv::Point2f CuboidTracker::smoothDirection(TrackPtr& trk, float vx, float vy)
+{
+    const float speed = std::hypot(vx, vy);
+
+    // 速度太小，使用历史稳定方向
+    if (speed < dir_params_.min_speed_for_direction) {
+        return cv::Point2f(trk->stable_dir_x * speed, trk->stable_dir_y * speed);
+    }
+
+    const float dir_x = vx / speed;
+    const float dir_y = vy / speed;
+
+    // 更新方向历史
+    trk->dir_history.push_back(std::make_pair(dir_x, dir_y));
+    if (trk->dir_history.size() > static_cast<size_t>(dir_params_.max_dir_history)) {
+        trk->dir_history.pop_front();
+    }
+
+    // 方向一致性检查
+    if (trk->dir_history.size() >= 3) {
+        const size_t n = trk->dir_history.size();
+        const size_t window = std::min(n, size_t(5));
+        auto start = trk->dir_history.end() - window;
+
+        float cos_sum = 0.0f, sin_sum = 0.0f;
+        for (auto it = start; it != trk->dir_history.end(); ++it) {
+            cos_sum += it->first;
+            sin_sum += it->second;
+        }
+
+        const float avg_cos = cos_sum / window;
+        const float avg_sin = sin_sum / window;
+        const float avg_len = std::hypot(avg_cos, avg_sin);
+
+        // 方向不稳定，使用稳定方向
+        if (avg_len < 0.7f) {
+            trk->dir_stable_count = 0;
+            if (trk->age() < 5) {
+                trk->stable_dir_x = dir_x;
+                trk->stable_dir_y = dir_y;
+            }
+            return cv::Point2f(trk->stable_dir_x * speed, trk->stable_dir_y * speed);
+        }
+
+        // 方向稳定，更新稳定方向
+        if (avg_len > dir_params_.stable_dir_threshold) {
+            trk->dir_stable_count++;
+            if (trk->dir_stable_count >= 2) {
+                trk->stable_dir_x = avg_cos / avg_len;
+                trk->stable_dir_y = avg_sin / avg_len;
+            }
+        }
+
+        return cv::Point2f(trk->stable_dir_x * speed, trk->stable_dir_y * speed);
+    }
+
+    return cv::Point2f(vx, vy);
+}
+
+int CuboidTracker::classifyVelocityState(const TrackPtr& trk, float speed) const
+{
+    if (speed < dir_params_.still_speed_threshold) {
+        return 0;  // 静止
+    } else if (speed < dir_params_.slow_speed_threshold) {
+        return 1;  // 慢速
+    } else if (speed < 3.0f) {
+        return 2;  // 中速
+    } else {
+        return 3;  // 快速
+    }
+}
+
+cv::Point2f CuboidTracker::applyVelocitySmoothingStrategy(
+    TrackPtr& trk,
+    float raw_vx,
+    float raw_vy)
+{
+    const float speed = std::hypot(raw_vx, raw_vy);
+    const int state = classifyVelocityState(trk, speed);
+
+    if (state == 0) {  // 静止
+        const float alpha = 0.1f;
+        trk->still_counter++;
+        if (trk->still_counter > 3) {
+            return cv::Point2f(0.0f, 0.0f);
+        }
+        return cv::Point2f(raw_vx * alpha, raw_vy * alpha);
+    }
+
+    if (state == 1) {  // 慢速：方向稳定性优先
+        cv::Point2f v = medianFilterDirection(trk, raw_vx, raw_vy);
+        v = smoothDirection(trk, v.x, v.y);
+
+        const float alpha = 0.3f;
+        const float vx = alpha * v.x + (1.0f - alpha) * trk->slow_vx;
+        const float vy = alpha * v.y + (1.0f - alpha) * trk->slow_vy;
+        trk->slow_vx = vx;
+        trk->slow_vy = vy;
+        return cv::Point2f(vx, vy);
+    }
+
+    if (state == 2) {  // 中速：中等平滑
+        return smoothDirection(trk, raw_vx, raw_vy);
+    }
+
+    // 快速：最小平滑
+    clipVelocity(raw_vx, raw_vy, 20.0f);
+    return cv::Point2f(raw_vx, raw_vy);
+}
+
+float CuboidTracker::computeVelocityConfidence(
+    const TrackPtr& trk,
+    float vx,
+    float vy) const
+{
+    const float speed = std::hypot(vx, vy);
+
+    // 速度幅值置信度
+    float speed_conf;
+    if (speed < 0.3f) {
+        speed_conf = 0.1f;
+    } else if (speed < 1.0f) {
+        speed_conf = 0.5f;
+    } else {
+        speed_conf = 0.9f;
+    }
+
+    // 方向一致性置信度
+    float dir_conf = 1.0f;
+    if (trk->dir_history.size() >= 5) {
+        const size_t n = trk->dir_history.size();
+        auto start = trk->dir_history.end() - std::min(n, size_t(5));
+        float cos_sum = 0.0f, sin_sum = 0.0f;
+        for (auto it = start; it != trk->dir_history.end(); ++it) {
+            cos_sum += it->first;
+            sin_sum += it->second;
+        }
+        dir_conf = std::hypot(cos_sum, sin_sum) / 5.0f;
+    }
+
+    // 跟踪状态置信度
+    float state_conf = 1.0f;
+    if (trk->state == TRACK_NEW) {
+        state_conf = 0.3f;
+    } else if (trk->missed > 0) {
+        state_conf = 0.5f;
+    }
+
+    return clip(speed_conf * dir_conf * state_conf, 0.0f, 1.0f);
+}
+
+cv::Point2f CuboidTracker::weightedVelocityOutput(
+    TrackPtr& trk,
+    float kf_vx,
+    float kf_vy,
+    float meas_vx,
+    float meas_vy)
+{
+    const float confidence = computeVelocityConfidence(trk, meas_vx, meas_vy);
+    trk->last_confidence = confidence;
+
+    // 低置信度时更多依赖卡尔曼滤波
+    const float beta = 1.0f - confidence * 0.8f;  // 0.2 ~ 1.0
+
+    float vx = (1.0f - beta) * kf_vx + beta * meas_vx;
+    float vy = (1.0f - beta) * kf_vy + beta * meas_vy;
+
+    // 置信度极低，使用KF
+    if (confidence < 0.2f) {
+        return cv::Point2f(kf_vx, kf_vy);
+    }
+
+    return cv::Point2f(vx, vy);
+}
+
+void CuboidTracker::clipVelocity(float& vx, float& vy, float max_speed) const
+{
+    const float speed = std::hypot(vx, vy);
+    if (speed > max_speed) {
+        const float scale = max_speed / speed;
+        vx *= scale;
+        vy *= scale;
+    }
+}
+
+void CuboidTracker::setDirectionSmoothParams(const DirectionSmoothParams& params)
+{
+    dir_params_ = params;
+}
+
+const DirectionSmoothParams& CuboidTracker::getDirectionSmoothParams() const
+{
+    return dir_params_;
+}
+
+// 在 CuboidTracker.cpp 中添加
+
+void CuboidTracker::reserveMemory(int max_tracks)
+{
+    // 预分配向量容量
+    tracked_.reserve(max_tracks);
+    lost_.reserve(max_tracks);
+    removed_.reserve(max_tracks);
+    
+    // 预分配对象池
+    track_pool_.reserve(max_tracks);
+    track_id_pool_.reserve(max_tracks * 2 + 1);
+}
+
+void CuboidTracker::trimMemory()
+{
+    // 清理已移除的跟踪对象
+    const size_t max_removed = 1000;
+    if (removed_.size() > max_removed) {
+        removed_.erase(removed_.begin(), removed_.end() - max_removed);
+    }
+    
+    // 压缩向量容量（如果需要）
+    if (tracked_.capacity() > tracked_.size() * 2 + 100) {
+        std::vector<TrackPtr>(tracked_).swap(tracked_);
+    }
+    if (lost_.capacity() > lost_.size() * 2 + 100) {
+        std::vector<TrackPtr>(lost_).swap(lost_);
+    }
+}
+
+size_t CuboidTracker::getMemoryUsage() const
+{
+    size_t total = 0;
+    
+    // 计算向量内存
+    total += tracked_.capacity() * sizeof(TrackPtr);
+    total += lost_.capacity() * sizeof(TrackPtr);
+    total += removed_.capacity() * sizeof(TrackPtr);
+    
+    // 计算每个 Track 的内存
+    auto calc_track_memory = [](const TrackPtr& trk) -> size_t {
+        size_t size = sizeof(CuboidTrack);
+        size += trk->pos_history.size() * sizeof(std::tuple<float, float, std::int64_t>);
+        size += trk->dir_history.size() * sizeof(std::pair<float, float>);
+        size += trk->angle_history.size() * sizeof(float);
+        return size;
+    };
+    
+    for (const auto& trk : tracked_) {
+        total += calc_track_memory(trk);
+    }
+    for (const auto& trk : lost_) {
+        total += calc_track_memory(trk);
+    }
+    for (const auto& trk : removed_) {
+        total += calc_track_memory(trk);
+    }
+    
+    return total;
 }
 
 } // namespace cuboid_tracker_impl

@@ -88,6 +88,19 @@ cv::Mat postproc_VisInstances(
     );
 }
 
+cv::Mat postproc_Vis3DOriBounding(
+    const cv::Mat& img,
+    const cv::Mat& detections
+) {
+    if (img.empty() || img.type() != CV_8UC3 || img.dims != 2) {
+        throw std::runtime_error("img must be (H,W,3) CV_8UC3");
+    }
+
+    return g_segpost_raeb->draw_3Dbounding(
+        img,
+        detections
+    );
+}
 // ------------- 实例可视化（带 tracking）-------------
 // 对齐 Python: postproc_VisInstances(img, objs, masks, track_info)
 cv::Mat postproc_VisInstances(

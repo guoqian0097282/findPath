@@ -175,7 +175,10 @@ cv::Mat postproc_VisInstances(
     const cv::Mat& objs,
     const cv::Mat& masks
 );
-
+cv::Mat postproc_Vis3DOriBounding(
+    const cv::Mat& img,
+    const cv::Mat& detections
+);
 /**
  * @brief 可视化实例结果（带 tracking；对应 Python: postproc_VisInstances(img, objs, masks, track_info)）
  *
