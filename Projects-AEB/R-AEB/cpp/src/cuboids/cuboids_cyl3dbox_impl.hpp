@@ -24,7 +24,13 @@
 
 #include "../common/logger.hpp"
 
-
+struct BicycleCorrection {
+    bool enable = true;
+    double scale_factor = 1.15;  // 后视相机自行车距离修正系数
+    double min_distance = -20.0;  // 最小修正距离（米）
+    double max_distance = -2.0;   // 最大修正距离（米）
+    int bicycle_cid = 1;          // 自行车的类别ID，根据实际情况调整
+} bicycle_correction;
 // =========================== Cyl3DBoxEstimator ===========================
 // 说明：
 // - 本文件实现与 Python 版 Cyl3DBoxEstimator 对齐的圆柱相机 3D 盒推算与绘制。
@@ -1018,6 +1024,31 @@ public:
                             pseudo_weight * std::cos(pseudo_cuboid.at<float>(0, 8));
                         cuboids.at<float>(i, 8) = static_cast<float>(
                             std::atan2(sin_theta, cos_theta));
+                    }
+                }
+            }
+        }
+        // 后视相机自行车距离修正
+        if (bicycle_correction.enable) 
+        {
+            for (int i = 0; i < N; ++i) 
+            {
+                const int cid = static_cast<int>(std::llround(cuboids.at<float>(i, 7)));
+                const float x_pos = cuboids.at<float>(i, 0);
+                
+                // 判断是否为后视相机（X轴为负）且为自行车
+                if (cid == bicycle_correction.bicycle_cid && x_pos < 0) {
+                    // 应用修正因子
+                    float corrected_x = x_pos / bicycle_correction.scale_factor;
+                    
+                    // 检查修正后的距离是否在合理范围内
+                    if (corrected_x >= bicycle_correction.min_distance && 
+                        corrected_x <= bicycle_correction.max_distance) {
+                        cuboids.at<float>(i, 0) = corrected_x;
+                        
+                        // 可选：同时修正宽度和长度，保持比例
+                        cuboids.at<float>(i, 3) /= bicycle_correction.scale_factor;
+                        cuboids.at<float>(i, 4) /= bicycle_correction.scale_factor;
                     }
                 }
             }

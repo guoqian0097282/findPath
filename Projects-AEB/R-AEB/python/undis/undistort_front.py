@@ -783,7 +783,7 @@ if __name__ == "__main__":
     import glob
     import os
     # 方法1：使用 glob 匹配
-    image_folder = "/home/gq/guoqian/Projects-AEB/M112/260825/front/2m"
+    image_folder = "/home/gq/guoqian/Projects-AEB/M112/260831bike/front/5m"
     image_paths = glob.glob(os.path.join(image_folder, "*.jpg"))
 
     # 读取所有图片

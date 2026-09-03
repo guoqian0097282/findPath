@@ -61,34 +61,6 @@ struct CuboidTrack {
     int missed = 0;
     int hits = 0;
 
-    // ===== Y轴速度平滑 =====
-    double y_vel_smooth = 0.0;
-    bool y_vel_smooth_valid = false;
-    double y_vel_output = 0.0;
-    bool y_vel_output_valid = false;
-    
-    // ===== Y轴速度历史 =====
-    static constexpr int Y_HISTORY_SIZE = 20;
-    double y_vel_history[Y_HISTORY_SIZE] = {0.0};
-    int y_history_idx = 0;
-    int y_history_count = 0;
-    
-    // ===== Y轴静止检测 =====
-    double y_vel_abs_mean = 0.0;
-    double y_vel_var = 0.0;
-    int y_still_counter = 0;
-    bool y_is_still = false;
-
-    // ===== 异常值检测 =====
-    double y_vel_predicted = 0.0;
-    double y_vel_consistency = 1.0;
-    double y_vel_confidence = 1.0;
-    int y_outlier_counter = 0;
-    bool y_is_outlier = false;
-    double y_vel_median_history[5] = {0.0};
-    int y_median_idx = 0;
-    int y_median_count = 0;
-
     int age() const {
         return frame_id - start_frame + 1;
     }
@@ -160,28 +132,6 @@ public:
 
     std::tuple<cv::Mat, cv::Mat> update(std::int64_t timestamp, const cv::Mat& cuboids);
 
-    // ===== Y轴平滑参数设置 =====
-    void setYVelocityParams(
-        double smooth_alpha = 0.30,
-        double still_thresh = 0.10,
-        double still_var_thresh = 0.02,
-        int still_confirm_frames = 3,
-        double max_y_vel = 5.0,
-        double vel_change_limit = 3.0
-    );
-
-    // ===== 异常检测参数设置 =====
-    void setYOutlierParams(
-        double outlier_thresh = 0.5,
-        double jump_thresh = 1.5,
-        double outlier_decay = 0.3,
-        int confirm_frames = 2
-    );
-
-    void enableYVelocitySmoothing(bool enable);
-    void configureForLowSpeedScenario(double fps = 14.0, double max_speed_kmh = 10.0);
-    void setFPS(double fps);
-
 private:
     static double clip(double x, double lo, double hi);
     static cv::Vec<float, 9> row_as_vec9(const cv::Mat& m, int r);
@@ -236,19 +186,6 @@ private:
         int track_state,
         int motion_state
     ) const;
-
-    // ===== Y轴速度平滑核心方法 =====
-    void updateYHistory(const TrackPtr& trk, double vy) const;
-    void detectStillState(const TrackPtr& trk) const;
-    
-    // ===== 异常值检测与抑制方法 =====
-    double detectAndSuppressOutlier(const TrackPtr& trk, double raw_vy, double dt) const;
-    double computeVelocityConsistency(const TrackPtr& trk, double raw_vy) const;
-    double medianFilterYVelocity(const TrackPtr& trk, double raw_vy) const;
-    bool isPhysicalVelocityJump(const TrackPtr& trk, double raw_vy, double dt) const;
-    
-    double smoothYVelocity(const TrackPtr& trk, double raw_vy, double dt) const;
-    double limitYVelocity(const TrackPtr& trk, double vy) const;
 
     static double size_cost(const cv::Vec<float, 9>& track_box, const cv::Vec<float, 9>& det_box, double eps = 1e-6);
     cv::Mat build_cost(
@@ -356,29 +293,8 @@ private:
     int mode_id_world_ = 1;
 
     double large_cost_ = 1e6;
-
-    // ===== Y轴速度平滑参数 =====
-    bool y_vel_smooth_enabled_ = true;
-    
-    double y_smooth_alpha_ = 0.30;
-    double y_max_vel_ = 5.0;
-    double y_vel_change_limit_ = 3.0;
-    
-    double y_still_thresh_ = 0.10;
-    double y_still_var_thresh_ = 0.02;
-    int y_still_confirm_frames_ = 3;
-    
-    // ===== 异常检测参数 =====
-    double y_outlier_thresh_ = 0.5;
-    double y_jump_thresh_ = 1.5;
-    double y_outlier_decay_ = 0.3;
-    int y_outlier_confirm_frames_ = 2;
-    
-    double actual_fps_ = 14.0;
-    double actual_dt_ = 0.071;
 };
 
-// ===== 构造函数实现 =====
 inline CuboidTracker::CuboidTracker(
     float track_high_thresh,
     float track_low_thresh,
@@ -488,11 +404,9 @@ inline CuboidTracker::CuboidTracker(
     turn_recover_min_speed_ = std::max(0.0, static_cast<double>(turn_recover_min_speed));
     turn_recover_comp_freeze_ = std::max(0, turn_recover_comp_freeze);
 
-    configureForLowSpeedScenario(14.0, 10.0);
     reset();
 }
 
-// ===== 公共接口实现 =====
 inline void CuboidTracker::reset() {
     tracked_.clear();
     lost_.clear();
@@ -513,60 +427,6 @@ inline std::tuple<cv::Mat, cv::Mat> CuboidTracker::update(std::int64_t timestamp
     return {track_info, tracked_cuboids_raw};
 }
 
-inline void CuboidTracker::setYVelocityParams(
-    double smooth_alpha,
-    double still_thresh,
-    double still_var_thresh,
-    int still_confirm_frames,
-    double max_y_vel,
-    double vel_change_limit
-) {
-    y_smooth_alpha_ = clip(smooth_alpha, 0.05, 0.95);
-    y_still_thresh_ = std::max(0.01, still_thresh);
-    y_still_var_thresh_ = std::max(0.001, still_var_thresh);
-    y_still_confirm_frames_ = std::max(1, still_confirm_frames);
-    y_max_vel_ = std::max(0.5, max_y_vel);
-    y_vel_change_limit_ = std::max(0.1, vel_change_limit);
-}
-
-inline void CuboidTracker::setYOutlierParams(
-    double outlier_thresh,
-    double jump_thresh,
-    double outlier_decay,
-    int confirm_frames
-) {
-    y_outlier_thresh_ = clip(outlier_thresh, 0.1, 0.9);
-    y_jump_thresh_ = std::max(0.1, jump_thresh);
-    y_outlier_decay_ = clip(outlier_decay, 0.0, 0.8);
-    y_outlier_confirm_frames_ = std::max(1, confirm_frames);
-}
-
-inline void CuboidTracker::enableYVelocitySmoothing(bool enable) {
-    y_vel_smooth_enabled_ = enable;
-}
-
-inline void CuboidTracker::configureForLowSpeedScenario(double fps, double max_speed_kmh) {
-    actual_fps_ = std::max(5.0, std::min(30.0, fps));
-    actual_dt_ = 1.0 / actual_fps_;
-    
-    y_smooth_alpha_ = 0.30;
-    y_still_thresh_ = 0.10;
-    y_still_var_thresh_ = 0.02;
-    y_still_confirm_frames_ = 3;
-    y_vel_change_limit_ = 3.0;
-    y_max_vel_ = std::max(2.0, std::min(5.0, max_speed_kmh / 3.6 * 1.8));
-    
-    y_outlier_thresh_ = 0.5;
-    y_jump_thresh_ = 1.5;
-    y_outlier_decay_ = 0.3;
-    y_outlier_confirm_frames_ = 2;
-}
-
-inline void CuboidTracker::setFPS(double fps) {
-    configureForLowSpeedScenario(fps, 10.0);
-}
-
-// ===== 静态辅助函数 =====
 inline double CuboidTracker::clip(double x, double lo, double hi) {
     return std::max(lo, std::min(hi, x));
 }
@@ -640,7 +500,6 @@ inline int CuboidTracker::cls_to_int(float v) {
     return static_cast<int>(std::lround(static_cast<double>(v)));
 }
 
-// ===== KF相关函数 =====
 inline void CuboidTracker::init_kf_state(
     double px,
     double py,
@@ -729,8 +588,6 @@ inline void CuboidTracker::kf_update(
     const cv::Matx<double, 4, 4> IKH = I - K * H;
     P_post = IKH * P_pre * IKH.t() + K * R * K.t();
 }
-
-// ===== 速度相关函数 =====
 inline std::pair<double, double> CuboidTracker::clip_vel(double vx, double vy) const {
     const double s = std::hypot(vx, vy);
     if (s <= vel_clip_mps_) {
@@ -757,8 +614,7 @@ inline cv::Matx<double, 4, 1> CuboidTracker::blend_measured_velocity(
     double dt,
     double innovation_m
 ) const {
-    (void)trk;
-    if (dt <= min_effective_dt_sec_) {
+    if ((!trk->last_meas_valid) || (dt <= min_effective_dt_sec_)) {
         return x_post;
     }
 
@@ -775,301 +631,6 @@ inline cv::Matx<double, 4, 1> CuboidTracker::blend_measured_velocity(
     return x2;
 }
 
-// ===== Y轴速度平滑核心函数 =====
-inline void CuboidTracker::updateYHistory(const TrackPtr& trk, double vy) const {
-    const int idx = trk->y_history_idx;
-    const_cast<TrackPtr&>(trk)->y_vel_history[idx] = vy;
-    const_cast<TrackPtr&>(trk)->y_history_idx = (idx + 1) % CuboidTrack::Y_HISTORY_SIZE;
-    const_cast<TrackPtr&>(trk)->y_history_count =
-        std::min(trk->y_history_count + 1, CuboidTrack::Y_HISTORY_SIZE);
-}
-
-inline void CuboidTracker::detectStillState(const TrackPtr& trk) const {
-    const int count = trk->y_history_count;
-    if (count < 3) {
-        const_cast<TrackPtr&>(trk)->y_is_still = false;
-        const_cast<TrackPtr&>(trk)->y_still_counter = 0;
-        return;
-    }
-
-    const int window_size = std::min(count, std::max(3, static_cast<int>(actual_fps_ * 0.5)));
-    const int start_idx = (trk->y_history_idx - window_size + CuboidTrack::Y_HISTORY_SIZE) % CuboidTrack::Y_HISTORY_SIZE;
-    
-    double sum_abs = 0.0, sum2 = 0.0, sum_signed = 0.0;
-    for (int i = 0; i < window_size; ++i) {
-        const int idx = (start_idx + i) % CuboidTrack::Y_HISTORY_SIZE;
-        const double v = trk->y_vel_history[idx];
-        sum_abs += std::abs(v);
-        sum2 += v * v;
-        sum_signed += v;
-    }
-    const double n = static_cast<double>(window_size);
-    const double abs_mean = sum_abs / n;
-    const double mean = sum_signed / n;
-    const double variance = std::max(0.0, (sum2 / n) - (mean * mean));
-
-    const_cast<TrackPtr&>(trk)->y_vel_abs_mean = abs_mean;
-    const_cast<TrackPtr&>(trk)->y_vel_var = variance;
-
-    const bool has_direction = std::abs(mean) > y_still_thresh_ * 0.5;
-    const bool is_still = (abs_mean < y_still_thresh_ && variance < y_still_var_thresh_) || 
-                           (!has_direction && abs_mean < y_still_thresh_ * 1.5);
-    
-    if (is_still) {
-        const_cast<TrackPtr&>(trk)->y_still_counter++;
-        if (trk->y_still_counter >= y_still_confirm_frames_) {
-            const_cast<TrackPtr&>(trk)->y_is_still = true;
-        }
-    } else {
-        const_cast<TrackPtr&>(trk)->y_still_counter = 0;
-        const_cast<TrackPtr&>(trk)->y_is_still = false;
-    }
-}
-
-// ===== 异常值检测与抑制 =====
-inline double CuboidTracker::medianFilterYVelocity(
-    const TrackPtr& trk,
-    double raw_vy
-) const {
-    const int idx = trk->y_median_idx;
-    const_cast<TrackPtr&>(trk)->y_vel_median_history[idx] = raw_vy;
-    const_cast<TrackPtr&>(trk)->y_median_idx = (idx + 1) % 5;
-    const_cast<TrackPtr&>(trk)->y_median_count = 
-        std::min(trk->y_median_count + 1, 5);
-    
-    if (trk->y_median_count < 3) {
-        return raw_vy;
-    }
-    
-    std::vector<double> vals;
-    vals.reserve(trk->y_median_count);
-    for (int i = 0; i < trk->y_median_count; ++i) {
-        vals.push_back(trk->y_vel_median_history[i]);
-    }
-    std::nth_element(vals.begin(), vals.begin() + vals.size() / 2, vals.end());
-    return vals[vals.size() / 2];
-}
-
-inline double CuboidTracker::computeVelocityConsistency(
-    const TrackPtr& trk,
-    double raw_vy
-) const {
-    const int count = trk->y_history_count;
-    if (count < 3) {
-        return 0.8;
-    }
-    
-    double sum = 0.0, sum_abs = 0.0;
-    const int window = std::min(count, 5);
-    const int start_idx = (trk->y_history_idx - window + CuboidTrack::Y_HISTORY_SIZE) % CuboidTrack::Y_HISTORY_SIZE;
-    for (int i = 0; i < window; ++i) {
-        const int idx = (start_idx + i) % CuboidTrack::Y_HISTORY_SIZE;
-        sum += trk->y_vel_history[idx];
-        sum_abs += std::abs(trk->y_vel_history[idx]);
-    }
-    const double mean = sum / window;
-    const double abs_mean = sum_abs / window;
-    
-    const double diff = std::abs(raw_vy - mean);
-    const double diff_ratio = diff / (abs_mean + 0.01);
-    
-    double trend = 0.0;
-    if (count >= 4) {
-        const int trend_start = (trk->y_history_idx - 4 + CuboidTrack::Y_HISTORY_SIZE) % CuboidTrack::Y_HISTORY_SIZE;
-        double v0 = trk->y_vel_history[trend_start];
-        double v1 = trk->y_vel_history[(trend_start + 2) % CuboidTrack::Y_HISTORY_SIZE];
-        trend = (v1 - v0) / 2.0;
-    }
-    
-    double predicted = mean + trend;
-    const double pred_diff = std::abs(raw_vy - predicted);
-    const double pred_diff_ratio = pred_diff / (abs_mean + 0.01);
-    
-    double consistency = 1.0 - std::min(1.0, diff_ratio / 2.0);
-    consistency = consistency * 0.5 + (1.0 - std::min(1.0, pred_diff_ratio / 2.0)) * 0.5;
-    
-    if (trk->y_vel_smooth_valid && count >= 3) {
-        const double sign_current = raw_vy > 0 ? 1.0 : -1.0;
-        const double sign_history = trk->y_vel_smooth > 0 ? 1.0 : -1.0;
-        if (sign_current != sign_history && std::abs(raw_vy) > 0.2) {
-            consistency *= 0.6;
-        }
-    }
-    
-    return clip(consistency, 0.0, 1.0);
-}
-
-inline bool CuboidTracker::isPhysicalVelocityJump(
-    const TrackPtr& trk,
-    double raw_vy,
-    double dt
-) const {
-    if (!trk->y_vel_smooth_valid || dt < 1e-6) {
-        return false;
-    }
-    
-    const double diff = std::abs(raw_vy - trk->y_vel_smooth);
-    if (diff > y_jump_thresh_) {
-        return true;
-    }
-    
-    const double acceleration = diff / dt;
-    const double accel_thresh = 10.0 + std::abs(trk->y_vel_smooth) * 2.0;
-    if (acceleration > accel_thresh) {
-        return true;
-    }
-    
-    if (trk->y_history_count >= 3) {
-        double max_abs = 0.0;
-        const int check_count = std::min(trk->y_history_count, 10);
-        for (int i = 0; i < check_count; ++i) {
-            const int idx = (trk->y_history_idx - 1 - i + CuboidTrack::Y_HISTORY_SIZE) % CuboidTrack::Y_HISTORY_SIZE;
-            max_abs = std::max(max_abs, std::abs(trk->y_vel_history[idx]));
-        }
-        if (max_abs > 0.1 && std::abs(raw_vy) > max_abs * 3.0) {
-            return true;
-        }
-    }
-    
-    return false;
-}
-
-inline double CuboidTracker::detectAndSuppressOutlier(
-    const TrackPtr& trk,
-    double raw_vy,
-    double dt
-) const {
-    double median_vy = medianFilterYVelocity(trk, raw_vy);
-    
-    double consistency = computeVelocityConsistency(trk, median_vy);
-    const_cast<TrackPtr&>(trk)->y_vel_consistency = consistency;
-    
-    bool is_jump = isPhysicalVelocityJump(trk, median_vy, dt);
-    
-    bool is_outlier = false;
-    double suppressed_vy = median_vy;
-    
-    if (consistency < y_outlier_thresh_ || is_jump) {
-        const_cast<TrackPtr&>(trk)->y_outlier_counter++;
-        if (trk->y_outlier_counter >= y_outlier_confirm_frames_) {
-            is_outlier = true;
-            const_cast<TrackPtr&>(trk)->y_is_outlier = true;
-        }
-    } else {
-        const_cast<TrackPtr&>(trk)->y_outlier_counter = 
-            std::max(0, trk->y_outlier_counter - 1);
-        if (trk->y_outlier_counter < y_outlier_confirm_frames_) {
-            const_cast<TrackPtr&>(trk)->y_is_outlier = false;
-        }
-    }
-    
-    if (trk->y_is_outlier) {
-        if (trk->y_vel_smooth_valid) {
-            double blend = std::max(0.0, 1.0 - consistency / y_outlier_thresh_);
-            blend = std::min(1.0, blend * 0.8 + 0.2);
-            
-            double predicted = trk->y_vel_smooth;
-            if (trk->y_history_count >= 3) {
-                const int latest_idx = (trk->y_history_idx - 1 + CuboidTrack::Y_HISTORY_SIZE) % CuboidTrack::Y_HISTORY_SIZE;
-                const double latest_vel = trk->y_vel_history[latest_idx];
-                const double trend = trk->y_vel_smooth - latest_vel;
-                predicted += trend * 0.5;
-            }
-            
-            suppressed_vy = (1.0 - blend) * median_vy + blend * predicted;
-            suppressed_vy = suppressed_vy * (1.0 - y_outlier_decay_) + 
-                           trk->y_vel_smooth * y_outlier_decay_;
-        } else {
-            suppressed_vy = median_vy * 0.3;
-        }
-        
-        const_cast<TrackPtr&>(trk)->y_vel_confidence = 0.2;
-    } else {
-        const_cast<TrackPtr&>(trk)->y_vel_confidence = 
-            std::min(1.0, trk->y_vel_confidence + 0.1);
-    }
-    
-    return suppressed_vy;
-}
-
-inline double CuboidTracker::smoothYVelocity(
-    const TrackPtr& trk,
-    double raw_vy,
-    double dt
-) const {
-    double clipped = clip(raw_vy, -y_max_vel_, y_max_vel_);
-
-    double filtered = detectAndSuppressOutlier(trk, clipped, dt);
-
-    updateYHistory(trk, filtered);
-
-    detectStillState(trk);
-
-    if (trk->y_is_still) {
-        const int last_idx = (trk->y_history_idx - 1 + CuboidTrack::Y_HISTORY_SIZE) % CuboidTrack::Y_HISTORY_SIZE;
-        const_cast<TrackPtr&>(trk)->y_vel_history[last_idx] = 0.0;
-        const_cast<TrackPtr&>(trk)->y_vel_smooth = 0.0;
-        const_cast<TrackPtr&>(trk)->y_vel_output = 0.0;
-        return 0.0;
-    }
-
-    if (!trk->y_vel_smooth_valid) {
-        const_cast<TrackPtr&>(trk)->y_vel_smooth = filtered;
-        const_cast<TrackPtr&>(trk)->y_vel_smooth_valid = true;
-        const_cast<TrackPtr&>(trk)->y_vel_output = filtered;
-        const_cast<TrackPtr&>(trk)->y_vel_output_valid = true;
-        return filtered;
-    }
-
-    double max_change = y_vel_change_limit_ * dt;
-    
-    if (trk->y_is_outlier) {
-        max_change *= 0.5;
-    }
-    
-    if (std::abs(trk->y_vel_smooth) < 0.05 && std::abs(filtered) > 0.2) {
-        max_change *= 5.0;
-    }
-    if (trk->y_vel_smooth * filtered < 0 && std::abs(filtered) > 0.1) {
-        max_change *= 4.0;
-    }
-    if (std::abs(filtered) > 0.5) {
-        const double speed_factor = std::min(3.0, std::abs(filtered) * 0.5 + 0.5);
-        max_change *= speed_factor;
-    }
-
-    double diff = filtered - trk->y_vel_smooth;
-    if (std::abs(diff) > max_change) {
-        diff = std::copysign(max_change, diff);
-    }
-    double limited = trk->y_vel_smooth + diff;
-
-    double alpha = y_smooth_alpha_;
-    
-    if (trk->y_is_outlier) {
-        alpha = 0.15;
-    } else if (std::abs(filtered) > 0.5) {
-        alpha = std::min(0.5, y_smooth_alpha_ * 1.5);
-    } else if (std::abs(trk->y_vel_smooth) < 0.05 && std::abs(filtered) > 0.2) {
-        alpha = 0.6;
-    } else if (trk->y_vel_smooth * filtered < 0 && std::abs(filtered) > 0.1) {
-        alpha = std::max(alpha, 0.5);
-    }
-
-    double smoothed = alpha * limited + (1.0 - alpha) * trk->y_vel_smooth;
-
-    const_cast<TrackPtr&>(trk)->y_vel_smooth = smoothed;
-    const_cast<TrackPtr&>(trk)->y_vel_output = smoothed;
-
-    return smoothed;
-}
-
-inline double CuboidTracker::limitYVelocity(const TrackPtr& trk, double vy) const {
-    (void)trk;
-    return clip(vy, -y_max_vel_, y_max_vel_);
-}
-
-// ===== 其他函数 =====
 inline std::pair<int, double> CuboidTracker::recovery_phase(const TrackPtr& trk) const {
     if (turn_recover_hold_ <= 0) {
         return {0, 0.0};
@@ -1284,7 +845,6 @@ inline std::pair<double, double> CuboidTracker::position_comp_delta(
     return {dir_x * dist, dir_y * dist};
 }
 
-// ===== Cost计算 =====
 inline double CuboidTracker::size_cost(const cv::Vec<float, 9>& track_box, const cv::Vec<float, 9>& det_box, double eps) {
     const double tl = track_box[3];
     const double tw = track_box[4];
@@ -1395,8 +955,6 @@ CuboidTracker::linear_assignment(const cv::Mat& cost, float thresh) {
     LinearAssignmentResult r = matching::linear_assignment(cost, thresh);
     return {r.matches, r.unmatched_a, r.unmatched_b};
 }
-
-// ===== Track管理 =====
 inline CuboidTracker::TrackPtr CuboidTracker::activate(const cv::Vec<float, 9>& det, int det_idx, std::int64_t timestamp) {
     TrackPtr trk = std::make_shared<CuboidTrack>();
     trk->track_id = next_id();
@@ -1423,30 +981,9 @@ inline CuboidTracker::TrackPtr CuboidTracker::activate(const cv::Vec<float, 9>& 
     trk->stable_cnt = 0;
     trk->missed = 0;
     trk->hits = 1;
-
-    trk->y_vel_smooth = 0.0;
-    trk->y_vel_smooth_valid = false;
-    trk->y_vel_output = 0.0;
-    trk->y_vel_output_valid = false;
-    trk->y_history_count = 0;
-    trk->y_history_idx = 0;
-    trk->y_vel_abs_mean = 0.0;
-    trk->y_vel_var = 0.0;
-    trk->y_still_counter = 0;
-    trk->y_is_still = false;
-    
-    trk->y_vel_predicted = 0.0;
-    trk->y_vel_consistency = 1.0;
-    trk->y_vel_confidence = 1.0;
-    trk->y_outlier_counter = 0;
-    trk->y_is_outlier = false;
-    trk->y_median_idx = 0;
-    trk->y_median_count = 0;
-
     return trk;
 }
 
-// ===== 核心更新函数 =====
 inline void CuboidTracker::update_track(
     const TrackPtr& trk,
     const cv::Vec<float, 9>& det,
@@ -1468,7 +1005,6 @@ inline void CuboidTracker::update_track(
     }
 
     cv::Matx<double, 2, 1> z(static_cast<double>(det[0]), static_cast<double>(det[1]));
-
     const double dx = z(0, 0) - x_pre(0, 0);
     const double dy = z(1, 0) - x_pre(1, 0);
     const double innov = std::hypot(dx, dy);
@@ -1478,12 +1014,10 @@ inline void CuboidTracker::update_track(
         z(1, 0) = x_pre(1, 0) + dy * scale;
     }
 
+    bool has_meas_velocity = false;
     double vmx = 0.0;
     double vmy = 0.0;
-    bool has_meas_velocity = false;
-    const bool has_valid_measurement = trk->last_meas_valid && dt > min_effective_dt_sec_;
-    
-    if (has_valid_measurement) {
+    if (trk->last_meas_valid && dt > min_effective_dt_sec_) {
         vmx = (z(0, 0) - trk->last_meas_x) / dt;
         vmy = (z(1, 0) - trk->last_meas_y) / dt;
         std::tie(vmx, vmy) = clip_vel(vmx, vmy);
@@ -1495,33 +1029,12 @@ inline void CuboidTracker::update_track(
     cv::Matx<double, 4, 1> x_post{};
     cv::Matx<double, 4, 4> P_post{};
     kf_update(x_pre, P_pre, z, x_post, P_post);
+    x_post = blend_measured_velocity(trk, x_post, z, dt, innov_used);
+    x_post = clip_speed(x_post);
 
     double kf_vx = x_post(2, 0);
     double kf_vy = x_post(3, 0);
-
-    if (has_meas_velocity) {
-        const double ratio = clip(innov_used / vel_meas_innov_for_max_, 0.0, 1.0);
-        const double beta = vel_meas_blend_ + (vel_meas_blend_max_ - vel_meas_blend_) * ratio;
-        kf_vx = (1.0 - beta) * x_post(2, 0) + beta * vmx;
-    }
-
-    if (y_vel_smooth_enabled_) {
-        if (has_meas_velocity) {
-            kf_vy = smoothYVelocity(trk, vmy, dt);
-        } else {
-            double vy = clip(x_post(3, 0), -y_max_vel_, y_max_vel_);
-            kf_vy = smoothYVelocity(trk, vy, dt);
-        }
-    } else {
-        kf_vy = limitYVelocity(trk, kf_vy);
-    }
-
-    cv::Matx<double, 4, 1> x_final = x_post;
-    x_final(2, 0) = kf_vx;
-    x_final(3, 0) = kf_vy;
-    x_final = clip_speed(x_final);
-
-    double speed = std::hypot(x_final(2, 0), x_final(3, 0));
+    double speed = std::hypot(kf_vx, kf_vy);
     const double vm_speed = has_meas_velocity ? std::hypot(vmx, vmy) : 0.0;
 
     bool trigger_turn_recover = false;
@@ -1530,7 +1043,7 @@ inline void CuboidTracker::update_track(
             trigger_turn_recover = true;
         }
         if (speed >= turn_recover_min_speed_) {
-            const double cos_h = clip((x_final(2, 0) * vmx + x_final(3, 0) * vmy) / std::max(speed * vm_speed, 1e-9), -1.0, 1.0);
+            const double cos_h = clip((kf_vx * vmx + kf_vy * vmy) / std::max(speed * vm_speed, 1e-9), -1.0, 1.0);
             if (cos_h <= turn_recover_cos_) {
                 trigger_turn_recover = true;
             }
@@ -1549,32 +1062,19 @@ inline void CuboidTracker::update_track(
     }
 
     if (recover_active) {
-        x_final = apply_turn_recovery(trk, x_final, z, vmx, vmy, has_meas_velocity);
-        if (y_vel_smooth_enabled_) {
-            kf_vy = smoothYVelocity(trk, x_final(3, 0), dt);
-            x_final(3, 0) = kf_vy;
-        }
-        kf_vx = x_final(2, 0);
-        kf_vy = x_final(3, 0);
+        x_post = apply_turn_recovery(trk, x_post, z, vmx, vmy, has_meas_velocity);
+        kf_vx = x_post(2, 0);
+        kf_vy = x_post(3, 0);
         speed = std::hypot(kf_vx, kf_vy);
     }
 
-    const double fx = x_final(0, 0);
-    const double fy = x_final(1, 0);
-
+    const double fx = x_post(0, 0);
+    const double fy = x_post(1, 0);
     update_motion_state(trk, speed);
     update_output_velocity(trk, kf_vx, kf_vy, true);
 
-    trk->x = x_final;
-    
-    cv::Matx<double, 4, 4> P_updated = P_post;
-    if (y_vel_smooth_enabled_ && trk->y_vel_smooth_valid && 
-        !trk->y_is_outlier && trk->y_history_count > 5) {
-        P_updated(2, 2) *= 0.85;
-        P_updated(3, 3) *= 0.85;
-    }
-    trk->P = P_updated;
-    
+    trk->x = x_post;
+    trk->P = P_post;
     trk->last_timestamp = timestamp;
     trk->last_meas_x = z(0, 0);
     trk->last_meas_y = z(1, 0);
@@ -1614,14 +1114,6 @@ inline void CuboidTracker::predict_track_without_measure(const TrackPtr& trk, st
     kf_predict(trk->x, trk->P, dt, x_pre, P_pre);
     x_pre = clip_speed(x_pre);
 
-    if (y_vel_smooth_enabled_) {
-        double vy = clip(x_pre(3, 0), -y_max_vel_, y_max_vel_);
-        vy = smoothYVelocity(trk, vy, dt);
-        x_pre(3, 0) = vy;
-        const_cast<TrackPtr&>(trk)->y_vel_output = vy;
-        const_cast<TrackPtr&>(trk)->y_vel_output_valid = true;
-    }
-
     trk->x = x_pre;
     trk->P = P_pre;
     trk->last_timestamp = timestamp;
@@ -1646,7 +1138,6 @@ inline void CuboidTracker::predict_track_without_measure(const TrackPtr& trk, st
     update_output_velocity(trk, x_pre(2, 0), x_pre(3, 0), false);
 }
 
-// ===== Track列表操作 =====
 inline std::vector<CuboidTracker::TrackPtr> CuboidTracker::joint_tracks(
     const std::vector<TrackPtr>& a,
     const std::vector<TrackPtr>& b
@@ -1753,7 +1244,6 @@ inline std::pair<std::vector<CuboidTracker::TrackPtr>, std::vector<CuboidTracker
     return {tracked2, lost2};
 }
 
-// ===== 主更新函数 =====
 inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_estimate(
     std::int64_t timestamp,
     const cv::Mat& cuboids,
@@ -2022,11 +1512,6 @@ inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_
 
         double vx_out = trk->out_vel_valid ? trk->out_vx : vx_e;
         double vy_out = trk->out_vel_valid ? trk->out_vy : vy_e;
-        
-        if (y_vel_smooth_enabled_ && trk->y_vel_output_valid) {
-            vy_out = trk->y_vel_output;
-        }
-        
         if (mode == "world") {
             const double vx_base = vx_out;
             const double vy_base = vy_out;

@@ -39,12 +39,12 @@ namespace fs = std::filesystem;
 
 // ---------- 常量配置（按你项目实际改路径） ----------
 static const std::string kTask = "RAEB";
-static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/configFront_M112.jsonc";
+static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/configRear_M112.jsonc";
 static const std::string kModelPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/TI_lyl.onnx";
 
 // 修改为文件夹路径
-static const fs::path k3dImageDir = "/home/gq/guoqian/Projects-AEB/M112/test";
-static const fs::path k3dDetectionDir = "/home/gq/guoqian/Projects-AEB/3Dmodle/out_onnx2/";
+static const fs::path k3dImageDir = "/home/gq/guoqian/Projects-AEB/R-AEB/python/undis/out";
+static const fs::path k3dDetectionDir = "/home/gq/guoqian/Projects-AEB/3Dmodle/out_onnx/";
 static const fs::path k3dOutputDir = "./vis/";
 
 static const std::string kVis3dImagePrefix = "raeb_vis_3d_";
