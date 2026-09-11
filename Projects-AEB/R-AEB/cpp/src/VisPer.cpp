@@ -528,12 +528,12 @@ static void SmoothTrackedCuboidsVelocity(
     constexpr int kTrackLost = 2;
     constexpr int kMotionStatic = 1;
 
-    constexpr float kMovingAlpha = 0.30f;
+    constexpr float kMovingAlpha = 0.75f;
     constexpr float kLostAlpha = 0.12f;
     constexpr float kStaticAlpha = 0.18f;
     constexpr float kStaticDeadbandMps = 0.25f;
     constexpr float kOutputZeroMps = 0.05f;
-    constexpr float kMaxAccelMps2 = 6.0f;
+    constexpr float kMaxAccelMps2 = 12.0f;
     constexpr float kMinFrameDeltaMps = 0.18f;
     constexpr float kMaxFrameDeltaMps = 0.85f;
 
@@ -572,6 +572,14 @@ static void SmoothTrackedCuboidsVelocity(
                                     : (motion_state == kMotionStatic ? kStaticAlpha : kMovingAlpha);
             float smooth_vx = state.vx + alpha * (target_vx - state.vx);
             float smooth_vy = state.vy + alpha * (target_vy - state.vy);
+
+            // A sign change in the tracker output is an actual direction
+            // change; keeping the old sign here recreates the reported Y lag.
+            if (std::abs(target_vy) >= 0.10f &&
+                state.vy * target_vy < 0.0f)
+            {
+                smooth_vy = target_vy;
+            }
 
             const float dt_sec = RaebVelocitySmoothDtSec(timestamp, state.timestamp);
             const float max_delta = std::clamp(kMaxAccelMps2 * dt_sec, kMinFrameDeltaMps, kMaxFrameDeltaMps);

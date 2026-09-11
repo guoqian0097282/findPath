@@ -1038,6 +1038,18 @@ public:
                 
                 // 判断是否为后视相机（X轴为负）且为自行车
                 if (cid == bicycle_correction.bicycle_cid && x_pos < 0) {
+                    // 距离越远，修正系数越大（非线性修正）
+                    float distance = std::abs(x_pos);
+                    float scale_factor = 1.0f;
+                    if (distance < 6.0) {
+                        scale_factor = 1.00f;   // 近距离修正小
+                    } else if (distance < 8.0) {
+                        scale_factor = 1.15f;   // 中距离修正中等
+                    } else if (distance < 10.0) {
+                        scale_factor = 1.2f;   // 远距离修正大（您的实际情况）
+                    } else {
+                        scale_factor = 1.5f;   // 超远距离修正更大
+                    }
                     // 应用修正因子
                     float corrected_x = x_pos / bicycle_correction.scale_factor;
                     
