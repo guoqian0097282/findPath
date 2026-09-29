@@ -47,6 +47,9 @@ struct CuboidTrack {
     double last_meas_y = 0.0;
     bool last_meas_valid = false;
     std::int64_t last_meas_timestamp = 0;
+    double static_anchor_x = 0.0;
+    double static_anchor_y = 0.0;
+    bool static_anchor_valid = false;
     double last_innovation = 0.0;
     double meas_vx = 0.0;
     double meas_vy = 0.0;
@@ -63,6 +66,8 @@ struct CuboidTrack {
     int hits = 0;
     int rejected_measurements = 0;
     int static_evidence_count = 0;
+    int stationary_history_count = 0;
+    bool static_before_miss = false;
 
     int age() const {
         return frame_id - start_frame + 1;
@@ -300,6 +305,9 @@ private:
     double static_outlier_innovation_m_ = 0.45;
     double static_outlier_speed_mps_ = 1.50;
     double static_missed_velocity_decay_ = 0.35;
+    double static_reacquire_distance_m_ = 1.0;
+    double stationary_history_step_m_ = 0.25;
+    double stationary_history_reset_m_ = 0.80;
 };
 
 inline CuboidTracker::CuboidTracker(
@@ -930,7 +938,16 @@ inline cv::Mat CuboidTracker::build_cost(
             const double dcy = det[1];
             const double ddiag = det_diag[static_cast<size_t>(j)];
             const double dist = std::hypot(tcx - dcx, tcy - dcy);
-            if (dist > center_gate_m) {
+            const double track_speed = std::hypot(trk->x(2, 0), trk->x(3, 0));
+            const bool dynamic_track = trk->motion_state == MOTION_MOVING ||
+                                       track_speed >= vel_move_thresh_;
+            const double dynamic_gate = dynamic_track
+                                            ? std::min(
+                                                  4.0,
+                                                  1.0 + track_speed * default_dt_sec_
+                                              )
+                                            : 0.0;
+            if (dist > center_gate_m + dynamic_gate) {
                 continue;
             }
 
@@ -976,6 +993,9 @@ inline CuboidTracker::TrackPtr CuboidTracker::activate(const cv::Vec<float, 9>& 
     trk->last_meas_y = det[1];
     trk->last_meas_valid = true;
     trk->last_meas_timestamp = timestamp;
+    trk->static_anchor_x = det[0];
+    trk->static_anchor_y = det[1];
+    trk->static_anchor_valid = true;
     trk->last_innovation = 0.0;
     trk->meas_vx = 0.0;
     trk->meas_vy = 0.0;
@@ -991,6 +1011,8 @@ inline CuboidTracker::TrackPtr CuboidTracker::activate(const cv::Vec<float, 9>& 
     trk->hits = 1;
     trk->rejected_measurements = 0;
     trk->static_evidence_count = 0;
+    trk->stationary_history_count = 0;
+    trk->static_before_miss = false;
     return trk;
 }
 
@@ -1032,7 +1054,12 @@ inline void CuboidTracker::update_track(
     }
 
     double raw_meas_speed = 0.0;
+    double raw_step = 0.0;
     if (trk->last_meas_valid && measurement_dt > min_effective_dt_sec_) {
+        raw_step = std::hypot(
+            raw_z(0, 0) - trk->last_meas_x,
+            raw_z(1, 0) - trk->last_meas_y
+        );
         raw_meas_speed = std::hypot(
             (raw_z(0, 0) - trk->last_meas_x) / measurement_dt,
             (raw_z(1, 0) - trk->last_meas_y) / measurement_dt
@@ -1043,8 +1070,20 @@ inline void CuboidTracker::update_track(
     // cuboid solve error. Do not feed it into the KF: clipping the point still
     // creates a false velocity and lets that velocity survive missed frames.
     const bool has_static_evidence = trk->static_evidence_count >= 5;
-    const bool slow_track = (trk->motion_state == MOTION_STATIC || has_static_evidence) &&
-                            (prior_speed < vel_move_thresh_ || has_static_evidence);
+    const bool has_stationary_history = trk->stationary_history_count >= 5;
+    const bool acceleration_jump = has_stationary_history &&
+                                   !has_static_evidence &&
+                                   trk->motion_state != MOTION_STATIC &&
+                                   raw_step >= stationary_history_reset_m_;
+    const bool slow_track = (trk->motion_state == MOTION_STATIC ||
+                             has_static_evidence ||
+                             (has_stationary_history && !acceleration_jump)) &&
+                            (prior_speed < vel_move_thresh_ ||
+                             has_static_evidence ||
+                             (has_stationary_history && !acceleration_jump));
+    const bool historically_static = trk->motion_state == MOTION_STATIC ||
+                                     has_static_evidence ||
+                                     has_stationary_history;
     const bool static_outlier = slow_track &&
                                 trk->rejected_measurements == 0 &&
                                 raw_innov > static_outlier_innovation_m_ &&
@@ -1056,11 +1095,17 @@ inline void CuboidTracker::update_track(
                                   large_innovation &&
                                   raw_meas_speed > std::max(vel_clip_mps_, prior_speed * 2.5);
     const bool reject_measurement = static_outlier || implausible_jump;
-    const bool reacquired_static = (trk->motion_state == MOTION_STATIC || has_static_evidence) &&
+    const double static_anchor_distance = trk->static_anchor_valid
+                                              ? std::hypot(
+                                                    raw_z(0, 0) - trk->static_anchor_x,
+                                                    raw_z(1, 0) - trk->static_anchor_y
+                                                )
+                                              : std::numeric_limits<double>::infinity();
+    const bool reacquired_static = (historically_static || trk->static_before_miss) &&
                                    trk->missed > 0 &&
                                    trk->last_meas_valid &&
                                    measurement_dt > min_effective_dt_sec_ &&
-                                   raw_meas_speed <= vel_static_thresh_;
+                                   static_anchor_distance <= static_reacquire_distance_m_;
 
     cv::Matx<double, 2, 1> z = raw_z;
     if (reacquired_static) {
@@ -1068,7 +1113,7 @@ inline void CuboidTracker::update_track(
     } else if (reject_measurement) {
         z(0, 0) = x_pre(0, 0);
         z(1, 0) = x_pre(1, 0);
-    } else if (large_innovation) {
+    } else if (large_innovation && slow_track) {
         const double scale = max_innovation_m_ / std::max(raw_innov, 1e-9);
         z(0, 0) = x_pre(0, 0) + raw_dx * scale;
         z(1, 0) = x_pre(1, 0) + raw_dy * scale;
@@ -1098,10 +1143,17 @@ inline void CuboidTracker::update_track(
         x_post(1, 0) = z(1, 0);
         x_post(2, 0) = 0.0;
         x_post(3, 0) = 0.0;
+        vmx = 0.0;
+        vmy = 0.0;
+        has_meas_velocity = false;
+        trk->out_vx = 0.0;
+        trk->out_vy = 0.0;
     }
     if (reject_measurement && slow_track) {
         x_post(2, 0) *= static_missed_velocity_decay_;
         x_post(3, 0) *= static_missed_velocity_decay_;
+        trk->out_vx = 0.0;
+        trk->out_vy = 0.0;
     }
 
     double kf_vx = x_post(2, 0);
@@ -1159,17 +1211,39 @@ inline void CuboidTracker::update_track(
         trk->last_meas_y = raw_z(1, 0);
         trk->last_meas_valid = true;
         trk->last_meas_timestamp = timestamp;
+        if (has_static_evidence || reacquired_static) {
+            if (!trk->static_anchor_valid) {
+                trk->static_anchor_x = raw_z(0, 0);
+                trk->static_anchor_y = raw_z(1, 0);
+                trk->static_anchor_valid = true;
+            } else if (reacquired_static) {
+                trk->static_anchor_x = 0.8 * trk->static_anchor_x + 0.2 * raw_z(0, 0);
+                trk->static_anchor_y = 0.8 * trk->static_anchor_y + 0.2 * raw_z(1, 0);
+            }
+        }
     }
     trk->last_innovation = innov_used;
     trk->meas_vx = vmx;
     trk->meas_vy = vmy;
     trk->has_meas_velocity = has_meas_velocity;
     trk->missed = 0;
+    if (!reacquired_static) {
+        trk->static_before_miss = false;
+    }
     trk->rejected_measurements = reject_measurement
                                      ? trk->rejected_measurements + 1
                                      : 0;
     if (!reject_measurement) {
         constexpr double kStaticEvidenceSpeedMps = 0.60;
+        if (raw_step <= stationary_history_step_m_ &&
+            prior_speed <= vel_move_thresh_) {
+            trk->stationary_history_count = std::min(
+                trk->stationary_history_count + 1,
+                1000
+            );
+        } else if (raw_step >= stationary_history_reset_m_) {
+            trk->stationary_history_count = 0;
+        }
         if (raw_meas_speed <= kStaticEvidenceSpeedMps) {
             trk->static_evidence_count = std::min(trk->static_evidence_count + 1, 1000);
         } else if (raw_meas_speed >= vel_move_thresh_) {
@@ -1216,8 +1290,12 @@ inline void CuboidTracker::predict_track_without_measure(const TrackPtr& trk, st
     trk->meas_vx = 0.0;
     trk->meas_vy = 0.0;
     trk->missed += 1;
+    trk->static_before_miss = trk->motion_state == MOTION_STATIC ||
+                              trk->static_evidence_count >= 5 ||
+                              trk->stationary_history_count >= 5;
     if (trk->motion_state == MOTION_STATIC ||
         trk->static_evidence_count >= 5 ||
+        trk->stationary_history_count >= 5 ||
         std::hypot(trk->x(2, 0), trk->x(3, 0)) < vel_static_thresh_) {
         trk->x(2, 0) *= static_missed_velocity_decay_;
         trk->x(3, 0) *= static_missed_velocity_decay_;
