@@ -39,12 +39,14 @@ struct CuboidTrack {
     int frame_id = 0;
     int idx = -1;
     std::int64_t last_timestamp = 0;
+    std::int64_t last_detection_timestamp = 0;
 
     cv::Matx<double, 4, 1> x{};
     cv::Matx<double, 4, 4> P{};
 
     double last_meas_x = 0.0;
     double last_meas_y = 0.0;
+    bool last_detection_valid = false;
     bool last_meas_valid = false;
     double last_innovation = 0.0;
     double meas_vx = 0.0;
@@ -74,7 +76,7 @@ public:
         float track_high_thresh = 0.5f,
         float track_low_thresh = 0.3f,
         float match_thresh = 0.65f,
-        float new_track_thresh = 0.6f,
+        float new_track_thresh = 0.5f,
         int track_buffer = 30,
         int frame_rate = 30,
         float default_dt_ms = 100.0f,
@@ -87,7 +89,7 @@ public:
         float weight_cls_low = 0.60f,
         float weight_center_low = 0.30f,
         float weight_size_low = 0.10f,
-        float sigma_a = 2.0f,
+        float sigma_a = 3.5f,
         float sigma_z = 0.18f,
         float vel_static_thresh = 0.20f,
         float vel_move_thresh = 0.50f,
@@ -162,10 +164,10 @@ private:
     std::pair<double, double> clip_vel(double vx, double vy) const;
     cv::Matx<double, 4, 1> clip_speed(const cv::Matx<double, 4, 1>& x) const;
     cv::Matx<double, 4, 1> blend_measured_velocity(
-        const TrackPtr& trk,
         const cv::Matx<double, 4, 1>& x_post,
-        const cv::Matx<double, 2, 1>& z_used,
-        double dt,
+        double vmx,
+        double vmy,
+        bool has_meas_velocity,
         double innovation_m
     ) const;
 
@@ -186,7 +188,13 @@ private:
     ) const;
 
     void update_motion_state(const TrackPtr& trk, double speed) const;
-    void update_output_velocity(const TrackPtr& trk, double vx, double vy, bool has_measurement) const;
+    void update_output_velocity(
+        const TrackPtr& trk,
+        double vx,
+        double vy,
+        bool has_measurement,
+        bool rapid_response = false
+    ) const;
     double compute_dt(std::int64_t timestamp, std::int64_t last_timestamp) const;
     std::pair<double, double> predict_center(const TrackPtr& trk, std::int64_t timestamp) const;
     std::pair<double, double> position_comp_delta(
@@ -238,7 +246,7 @@ private:
     float match_thresh_ = 0.65f;
     float match_thresh_low_ = 0.80f;
     float match_thresh_new_ = 0.70f;
-    float new_track_thresh_ = 0.6f;
+    float new_track_thresh_ = 0.5f;
 
     int track_buffer_ = 30;
     int max_time_lost_ = 30;
@@ -260,7 +268,7 @@ private:
     double weight_center_low_ = 0.30;
     double weight_size_low_ = 0.10;
 
-    double sigma_a_ = 2.0;
+    double sigma_a_ = 3.5;
     double sigma_z_ = 0.18;
 
     double vel_static_thresh_ = 0.20;
@@ -272,7 +280,8 @@ private:
     double vel_meas_blend_ = 0.18;
     double vel_meas_blend_max_ = 0.45;
     double vel_meas_innov_for_max_ = 1.2;
-    double output_vel_alpha_ = 0.25;
+    double output_vel_alpha_ = 0.5;
+    double output_vel_alpha_fast_ = 0.65;
     double output_vel_alpha_lost_ = 0.10;
 
     double pos_comp_sec_ = 0.06;
@@ -636,19 +645,15 @@ inline cv::Matx<double, 4, 1> CuboidTracker::clip_speed(const cv::Matx<double, 4
 }
 
 inline cv::Matx<double, 4, 1> CuboidTracker::blend_measured_velocity(
-    const TrackPtr& trk,
     const cv::Matx<double, 4, 1>& x_post,
-    const cv::Matx<double, 2, 1>& z_used,
-    double dt,
+    double vmx,
+    double vmy,
+    bool has_meas_velocity,
     double innovation_m
 ) const {
-    if ((!trk->last_meas_valid) || (dt <= min_effective_dt_sec_)) {
+    if (!has_meas_velocity) {
         return x_post;
     }
-
-    double vmx = (z_used(0, 0) - trk->last_meas_x) / dt;
-    double vmy = (z_used(1, 0) - trk->last_meas_y) / dt;
-    std::tie(vmx, vmy) = clip_vel(vmx, vmy);
 
     const double ratio = clip(innovation_m / vel_meas_innov_for_max_, 0.0, 1.0);
     const double beta = vel_meas_blend_ + (vel_meas_blend_max_ - vel_meas_blend_) * ratio;
@@ -768,9 +773,12 @@ inline void CuboidTracker::update_output_velocity(
     const TrackPtr& trk,
     double vx,
     double vy,
-    bool has_measurement
+    bool has_measurement,
+    bool rapid_response
 ) const {
-    const double alpha = has_measurement ? output_vel_alpha_ : output_vel_alpha_lost_;
+    const double alpha = has_measurement
+        ? (rapid_response ? output_vel_alpha_fast_ : output_vel_alpha_)
+        : output_vel_alpha_lost_;
     if (!trk->out_vel_valid) {
         trk->out_vx = vx;
         trk->out_vy = vy;
@@ -1015,9 +1023,11 @@ inline CuboidTracker::TrackPtr CuboidTracker::activate(const cv::Vec<float, 9>& 
     trk->frame_id = frame_id_;
     trk->idx = det_idx;
     trk->last_timestamp = timestamp;
+    trk->last_detection_timestamp = timestamp;
     init_kf_state(static_cast<double>(det[0]), static_cast<double>(det[1]), trk->x, trk->P);
     trk->last_meas_x = det[0];
     trk->last_meas_y = det[1];
+    trk->last_detection_valid = true;
     trk->last_meas_valid = true;
     trk->last_innovation = 0.0;
     trk->meas_vx = 0.0;
@@ -1071,9 +1081,22 @@ inline void CuboidTracker::update_track(
     bool has_meas_velocity = false;
     double vmx = 0.0;
     double vmy = 0.0;
-    if (trk->last_meas_valid && dt > min_effective_dt_sec_) {
-        vmx = (z(0, 0) - trk->last_meas_x) / dt;
-        vmy = (z(1, 0) - trk->last_meas_y) / dt;
+    double measurement_dt = dt;
+    bool can_estimate_meas_velocity = trk->last_detection_valid;
+    if (trk->missed > 0) {
+        measurement_dt = static_cast<double>(timestamp - trk->last_detection_timestamp) * timestamp_scale_;
+        can_estimate_meas_velocity = can_estimate_meas_velocity &&
+            std::isfinite(measurement_dt) &&
+            measurement_dt >= min_effective_dt_sec_ &&
+            measurement_dt <= max_effective_dt_sec_;
+    } else {
+        can_estimate_meas_velocity = can_estimate_meas_velocity &&
+            trk->last_meas_valid &&
+            measurement_dt > min_effective_dt_sec_;
+    }
+    if (can_estimate_meas_velocity) {
+        vmx = (z(0, 0) - trk->last_meas_x) / measurement_dt;
+        vmy = (z(1, 0) - trk->last_meas_y) / measurement_dt;
         std::tie(vmx, vmy) = clip_vel(vmx, vmy);
         has_meas_velocity = true;
     }
@@ -1083,7 +1106,7 @@ inline void CuboidTracker::update_track(
     cv::Matx<double, 4, 1> x_post{};
     cv::Matx<double, 4, 4> P_post{};
     kf_update(x_pre, P_pre, z, x_post, P_post);
-    x_post = blend_measured_velocity(trk, x_post, z, dt, innov_used);
+    x_post = blend_measured_velocity(x_post, vmx, vmy, has_meas_velocity, innov_used);
     x_post = clip_speed(x_post);
 
     double kf_vx = x_post(2, 0);
@@ -1125,13 +1148,22 @@ inline void CuboidTracker::update_track(
     const double fx = x_post(0, 0);
     const double fy = x_post(1, 0);
     update_motion_state(trk, speed);
-    update_output_velocity(trk, kf_vx, kf_vy, true);
+    const double output_velocity_delta = std::hypot(
+        kf_vx - trk->out_vx,
+        kf_vy - trk->out_vy
+    );
+    const bool rapid_velocity_response = has_meas_velocity &&
+        output_velocity_delta >= 1.0 &&
+        trk->missed > 0;
+    update_output_velocity(trk, kf_vx, kf_vy, true, rapid_velocity_response);
 
     trk->x = x_post;
     trk->P = P_post;
     trk->last_timestamp = timestamp;
+    trk->last_detection_timestamp = timestamp;
     trk->last_meas_x = z(0, 0);
     trk->last_meas_y = z(1, 0);
+    trk->last_detection_valid = true;
     trk->last_meas_valid = true;
     trk->last_innovation = innov_used;
     trk->meas_vx = vmx;
