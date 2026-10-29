@@ -76,7 +76,7 @@ public:
         float track_high_thresh = 0.5f,
         float track_low_thresh = 0.3f,
         float match_thresh = 0.65f,
-        float new_track_thresh = 0.5f,
+        float new_track_thresh = 0.4f,
         int track_buffer = 30,
         int frame_rate = 30,
         float default_dt_ms = 100.0f,
@@ -97,8 +97,8 @@ public:
         int max_missed = 30,
         float vel_clip_mps = 8.0f,
         float max_innovation_m = 1.2f,
-        float vel_meas_blend = 0.18f,
-        float vel_meas_blend_max = 0.45f,
+        float vel_meas_blend = 0.40f,
+        float vel_meas_blend_max = 0.65f,
         float vel_meas_innov_for_max = 1.2f,
         float pos_comp_sec = 0.06f,
         float pos_comp_min_speed = 0.15f,
@@ -246,7 +246,7 @@ private:
     float match_thresh_ = 0.65f;
     float match_thresh_low_ = 0.80f;
     float match_thresh_new_ = 0.70f;
-    float new_track_thresh_ = 0.5f;
+    float new_track_thresh_ = 0.4f;
 
     int track_buffer_ = 30;
     int max_time_lost_ = 30;
@@ -277,10 +277,10 @@ private:
     int max_missed_ = 30;
     double vel_clip_mps_ = 8.0;
     double max_innovation_m_ = 1.2;
-    double vel_meas_blend_ = 0.18;
-    double vel_meas_blend_max_ = 0.45;
+    double vel_meas_blend_ = 0.40;
+    double vel_meas_blend_max_ = 0.65;
     double vel_meas_innov_for_max_ = 1.2;
-    double output_vel_alpha_ = 0.5;
+    double output_vel_alpha_ = 0.4;
     double output_vel_alpha_fast_ = 0.65;
     double output_vel_alpha_lost_ = 0.10;
 

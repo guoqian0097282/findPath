@@ -720,7 +720,7 @@ static int batch_process_3d_cases()
         0.5f,   // track_high_thresh
         0.3f,   // track_low_thresh
         0.6f,   // match_thresh
-        0.6f,   // new_track_thresh
+        0.4f,   // new_track_thresh
         30,     // track_buffer
         30,     // frame_rate
         100.0f, // default_dt_ms
@@ -741,8 +741,8 @@ static int batch_process_3d_cases()
         30,     // max_missed
         8.0f,   // vel_clip_mps
         1.2f,   // max_innovation_m
-        0.18f,  // vel_meas_blend
-        0.45f,  // vel_meas_blend_max
+        0.40f,  // vel_meas_blend
+        0.65f,  // vel_meas_blend_max
         1.2f,   // vel_meas_innov_for_max
         0.00f,  // pos_comp_sec
         0.15f,  // pos_comp_min_speed
