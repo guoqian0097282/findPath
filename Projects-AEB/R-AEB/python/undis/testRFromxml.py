@@ -4,8 +4,8 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 
-FRONT_XML_PATH = "/home/gq/guoqian/Projects-AEB/M310/front_3d_map.xml"
-REAR_XML_PATH = "/home/gq/guoqian/Projects-AEB/M310/rear_3d_map.xml"
+FRONT_XML_PATH = "/home/gq/guoqian/Projects-AEB/newCar/front_3d_map.xml"
+REAR_XML_PATH = "/home/gq/guoqian/Projects-AEB/newCar/rear_3d_map.xml"
 
 
 def euler_to_rotation_matrix(roll, pitch, yaw):
