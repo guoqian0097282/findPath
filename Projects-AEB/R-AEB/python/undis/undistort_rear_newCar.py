@@ -487,7 +487,8 @@ def build_map_cyl_to_fish() -> tuple[np.ndarray, np.ndarray, tuple[int, int], tu
         theta -= np.where(f_deriv != 0.0, f_val / f_deriv, 0.0)
     theta = np.where(base_valid, np.clip(theta, 0.0, theta_max), theta)
 
-    inv_d = np.where(d > 1e-6, 1.0 / d, 0.0)
+    # inv_d = np.where(d > 1e-6, 1.0 / d, 0.0)
+    inv_d = np.divide(1.0, d, out=np.zeros_like(d), where=d > 1e-6)
     y_ratio = du * inv_d
     z_ratio = dv * inv_d
     sin_t = np.sin(theta)
@@ -780,7 +781,7 @@ if __name__ == "__main__":
     import glob
     import os
     # 方法1：使用 glob 匹配
-    image_folder = "/home/gq/guoqian/Projects-AEB/M310/image2/"
+    image_folder = "/home/gq/guoqian/Projects-AEB/newCar/image"
     image_paths = glob.glob(os.path.join(image_folder, "*.jpg"))
 
     # 读取所有图片
