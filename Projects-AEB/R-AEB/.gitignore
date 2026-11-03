@@ -51,7 +51,7 @@ raeb_external_support/
 *.log
 *.txt
 .codex
-./autoCalibrate/build/*
-./autoCalibrate/build-aarch64/*
-./autoCalibrate/maps/*
-./autoCalibrate/*.jsonc
+autoCalibrate/build/
+autoCalibrate/build-aarch64/
+autoCalibrate/maps/
+autoCalibrate/*.jsonc

@@ -31,6 +31,12 @@ constexpr double kCenterV = 0.5;
 const fs::path kInputDirectory{"/home/gq/guoqian/Projects-AEB/newCar"};// /app/avm/params/cam
 const fs::path kInputDirectory2{"/home/gq/guoqian/Projects-AEB/newCar"};// /data/avm/calibrated
 const fs::path kOutputDirectory{"../autoCalibrate"};// /app/avm/aeb
+
+//arm build path
+// const fs::path kInputDirectory{"/app/avm/params/cam"};
+// const fs::path kInputDirectory2{"/media/data/avm/calibrated"};
+// const fs::path kOutputDirectory{"/app/avm/aeb"};
+
 using Vector3 = std::array<double, 3>;
 using Matrix3 = std::array<std::array<double, 3>, 3>;
 using Distortion = std::array<double, 4>;
