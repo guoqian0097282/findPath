@@ -39,11 +39,11 @@ namespace fs = std::filesystem;
 
 // ---------- 常量配置（按你项目实际改路径） ----------
 static const std::string kTask = "RAEB";
-static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/configFront_M112.jsonc";
+static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/M310/configFront_M310.jsonc";
 static const std::string kModelPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/TI_lyl.onnx";
 
 // 修改为文件夹路径
-static const fs::path k3dImageDir = "/home/gq/guoqian/Projects-AEB/R-AEB/python/undis/out";
+static const fs::path k3dImageDir = "/home/gq/guoqian/Projects-AEB/test/image";
 static const fs::path k3dDetectionDir = "/home/gq/guoqian/Projects-AEB/3Dmodle/out_onnx/";
 static const fs::path k3dOutputDir = "./vis/";
 
@@ -720,10 +720,10 @@ static int batch_process_3d_cases()
         0.5f,   // track_high_thresh
         0.3f,   // track_low_thresh
         0.6f,   // match_thresh
-        0.6f,   // new_track_thresh
+        0.4f,   // new_track_thresh
         30,     // track_buffer
         30,     // frame_rate
-        100.0f, // default_dt_ms
+        80.0f, // default_dt_ms
         1e-6f,  // timestamp_scale
         4.0f,   // center_gate_main_m
         5.5f,   // center_gate_low_m
