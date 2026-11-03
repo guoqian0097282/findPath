@@ -43,7 +43,7 @@ static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/M310/confi
 static const std::string kModelPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/TI_lyl.onnx";
 
 // 修改为文件夹路径
-static const fs::path k3dImageDir = "/home/gq/guoqian/Projects-AEB/test/image";
+static const fs::path k3dImageDir = "/home/gq/guoqian/Projects-AEB/R-AEB/python/undis/out";
 static const fs::path k3dDetectionDir = "/home/gq/guoqian/Projects-AEB/3Dmodle/out_onnx/";
 static const fs::path k3dOutputDir = "./vis/";
 
