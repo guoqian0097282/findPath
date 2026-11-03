@@ -1,0 +1,120 @@
+// R-AEB 任务配置文件
+{
+    "fisheye": {
+        "type": "fisheye",
+        "image_type": "NV12",
+        "world_x": -1,
+        "world_y": -0.0052748399999999994,
+        "world_z": 1.23033218,
+        "yaw": 181.50427199999999,
+        "pitch": 27.055327999999999,
+        "roll": 0.386291,
+        "angle_type": "degree",
+        "image_width": 1280,
+        "image_height": 960,
+        "focal_u": 316.89999389648438,
+        "focal_v": 316.89999389648438,
+        "center_u": 640,
+        "center_v": 480,
+        "fov": 204,
+        "pinhole_distort": [],
+        "fisheye_distort": [0.11604505263028428, -0.030114323640612166, 0.009351238376408496, -0.001846663863344212],
+        "R_act": [
+            [-0.89026079431800409, -0.023378723241051939, -0.45485069352469354],
+            [0.023185340556797277, -0.99971315360405322, 0.0060042063842040954],
+            [-0.45486059192190048, -0.0052005586870146753, 0.89054746987782818]
+        ],
+        "t_act": [-0.33076666800375676, 0.010524845295792732, -1.5505572340451579]
+    },
+    "cyl": {
+        "type": "cyl",
+        "image_type": "NV12",
+        "image_width": 960,
+        "image_height": 480,
+        "focal_u": 237.67499542236328,
+        "focal_v": 237.67499542236328,
+        "center_u": 480,
+        "center_v": 361.39069859931408,
+        "hfov_deg": 231.42505266409529,
+        "vfov_deg": 90.557751186300152,
+        "R_cam_to_cyl": [
+            [0.89056771028378601, 0.003066602804463196, 0.45484035589109106],
+            [0, 0.99997727246819745, -0.0067419987440267854],
+            [-0.45485069352469354, 0.0060042063842040954, 0.89054746987782818]
+        ],
+        "R_cyl_to_cam": [
+            [0.89056771028378601, 0, -0.45485069352469354],
+            [0.003066602804463196, 0.99997727246819745, 0.0060042063842040954],
+            [0.45484035589109106, -0.0067419987440267854, 0.89054746987782818]
+        ],
+        "R_act": [
+            [-0.99965537043142505, -0.026251483150677154, 0],
+            [0.026251483150677154, -0.99965537043142516, 0],
+            [0, 8.6736173798840355e-19, 1.0000000000000002]
+        ],
+        "t_act": [-0.99979384280480765, 0.020978461016510654, -1.2303321800000004]
+    },
+    "model": {
+        "name": "lyl",
+        "target_width": 960,
+        "target_height": 480,
+        "target_type": "NV12",
+        "num_cls": 8,
+        "num_mask": 32,
+        "conf_thresh": 0.5,
+        "iou_thresh": 0.3,
+        "mask_thresh": 0.5,
+        "batch_size": 1,
+        "mask_up": 4,
+        "id2name": {
+            "0": "person",
+            "1": "bicycle",
+            "2": "car",
+            "3": "motorcycle",
+            "4": "fake person",
+            "5": "bus",
+            "6": "fake bicycle",
+            "7": "truck"
+        },
+        "whitelist": {
+            "0": {"name": "person", "size": [0.4, 0.4, 1.7]},
+            "1": {"name": "bicycle", "size": [1.8, 0.6, 1.1]},
+            "2": {"name": "car", "size": [4.5, 1.8, 1.5]},
+            "3": {"name": "motorcycle", "size": [2.1, 0.8, 1.2]},
+            "4": {"name": "fake person", "size": [0.4, 0.4, 1.7]},
+            "5": {"name": "bus", "size": [12.0, 2.5, 3.2]},
+            "6": {"name": "fake bicycle", "size": [1.8, 0.6, 1.1]},
+            "7": {"name": "truck", "size": [8.0, 2.5, 3.5]}
+        }
+    },
+    "other": {"velocity_mode": "ego"},
+    "3d_model": {
+        "model_spec": {
+            "input_w": 512,
+            "input_h": 256,
+            "bbox_rows": 4,
+            "keypoint_count": 8,
+            "classes": [
+                {"model_id": 0, "output_id": 2, "name": "car", "color_bgr": [107, 107, 255]},
+                {"model_id": 1, "output_id": 0, "name": "person", "color_bgr": [43, 146, 255]},
+                {"model_id": 2, "output_id": 1, "name": "bike", "color_bgr": [59, 212, 255]}
+            ],
+            "ground_first": [0, 1, 2, 3],
+            "ground_second": [4, 5, 6, 7]
+        },
+        "postprocess": {"conf": 0.3, "iou": 0.45, "max_det": 10, "ground": "first"}
+    },
+    "angle_postproc": {
+        "enabled": true,
+        "column": 6,
+        "input_unit": "rad",
+        "scale": 1.0,
+        "offset": 0.0,
+        "invert": false,
+        "wrap_mode": "half_pi",
+        "decode_mode": "bins_residual",
+        "angle_bins": 8,
+        "raw_layout": "auto",
+        "raw_logits_first": true
+    }
+}
