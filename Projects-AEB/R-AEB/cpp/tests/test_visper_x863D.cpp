@@ -39,7 +39,7 @@ namespace fs = std::filesystem;
 
 // ---------- 常量配置（按你项目实际改路径） ----------
 static const std::string kTask = "RAEB";
-static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/M310/configFront_M310.jsonc";
+static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/M310/configRear_M310.jsonc";
 static const std::string kModelPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/TI_lyl.onnx";
 
 // 修改为文件夹路径
@@ -719,8 +719,8 @@ static int batch_process_3d_cases()
     cuboid_tracker_Init(
         0.5f,   // track_high_thresh
         0.3f,   // track_low_thresh
-        0.6f,   // match_thresh
-        0.4f,   // new_track_thresh
+        0.3f,   // match_thresh
+        0.3f,   // new_track_thresh
         30,     // track_buffer
         30,     // frame_rate
         80.0f, // default_dt_ms
