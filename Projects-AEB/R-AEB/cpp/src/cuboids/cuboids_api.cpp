@@ -37,6 +37,7 @@ cv::Mat cuboids_ProcRAEB(
         grounding_z,    // z_world 先验 / fallback
         masks          // 3D (N,H,W) CV_8U
     );
+    g_3dest_raeb->compensate_car_x_toward_camera(cuboids);
 
     return cuboids;
 }
@@ -51,8 +52,10 @@ cv::Mat cuboids_ProcRAEBAnd3D(
         throw std::runtime_error("Cyl3DBoxEstimator 未初始化：请先调用 cuboids_InitRAEB(...)");
     }
 
-    return g_3dest_raeb->cuboids_from_boxesAnd3D(
+    cv::Mat cuboids = g_3dest_raeb->cuboids_from_boxesAnd3D(
         objs, points3d, grounding_z, masks);
+    g_3dest_raeb->compensate_car_x_toward_camera(cuboids);
+    return cuboids;
 }
 
 cv::Mat cuboids_ProcRAEB3D(
@@ -63,7 +66,9 @@ cv::Mat cuboids_ProcRAEB3D(
         throw std::runtime_error("Cyl3DBoxEstimator 未初始化：请先调用 cuboids_InitRAEB(...)");
     }
 
-    return g_3dest_raeb->cuboids_from_3D(points3d, grounding_z);
+    cv::Mat cuboids = g_3dest_raeb->cuboids_from_3D(points3d, grounding_z);
+    g_3dest_raeb->compensate_car_x_toward_camera(cuboids);
+    return cuboids;
 }
 
 // ------------- 3D 盒可视化 -------------

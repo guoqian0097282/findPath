@@ -206,6 +206,32 @@ public:
         return out;
     }
 
+    void compensate_car_x_toward_camera(cv::Mat& cuboids) const {
+        CV_Assert(cuboids.empty() ||
+                  (cuboids.type() == CV_32F && cuboids.cols == 9));
+        for (int i = 0; i < cuboids.rows; ++i) {
+            const int cid = static_cast<int>(std::llround(
+                cuboids.at<float>(i, 7)));
+            if (cid != 2 || cuboids.at<float>(i, 3) <= 0.0f ||
+                cuboids.at<float>(i, 4) <= 0.0f ||
+                cuboids.at<float>(i, 5) <= 0.0f) {
+                continue;
+            }
+
+            const double x = cuboids.at<float>(i, 0);
+            const double y = cuboids.at<float>(i, 1);
+            if (!std::isfinite(y) || y < -2.0 || y > 2.0) {
+                continue;
+            }
+            const double delta_x = x - C_w_[0];
+            if (!std::isfinite(delta_x) || std::abs(delta_x) <= 1e-9) {
+                continue;
+            }
+            cuboids.at<float>(i, 0) = static_cast<float>(
+                x - std::copysign(1.0, delta_x));
+        }
+    }
+
     // objs: (N,7) [x1,y1,x2,y2,conf,cls,theta_rel]
     // z_world: 标量，作为底面高度的先验 / fallback
     // masks: 可选，3D (N,H,W) CV_8U；允许 empty()
@@ -375,9 +401,12 @@ public:
 
                 const double h_use = h;
                 double l_use = l;
-                const double w_use = dyn_w;
+                double w_use = dyn_w;
                 if (cid == 0) {
                     l_use = w_use;
+                } else if (cid == 1) {
+                    if (l_use < 1.0) l_use = 1.2;
+                    if (w_use < 0.4) w_use = 0.5;
                 }
 
                 cuboids.at<float>(i, 0) = static_cast<float>(cx);
@@ -542,8 +571,10 @@ public:
             cuboids.at<float>(i, 0) = static_cast<float>(cx);
             cuboids.at<float>(i, 1) = static_cast<float>(cy);
             cuboids.at<float>(i, 2) = static_cast<float>(cz);
-            cuboids.at<float>(i, 3) = static_cast<float>(l);
-            cuboids.at<float>(i, 4) = static_cast<float>(w);
+            cuboids.at<float>(i, 3) = static_cast<float>(
+                cid == 1 && l < 1.0 ? 1.2 : l);
+            cuboids.at<float>(i, 4) = static_cast<float>(
+                cid == 1 && w < 0.4 ? 0.5 : w);
             cuboids.at<float>(i, 5) = static_cast<float>(h);
             // 6,7,8 前面已经填好
         }
@@ -931,6 +962,22 @@ public:
                 bottom_center[0] += 0.25 * p[0];
                 bottom_center[1] += 0.25 * p[1];
             }
+            cv::Vec2d output_center_xy(bottom_center[0], bottom_center[1]);
+            if (cid == 2) {
+                // 车辆位置取更靠近相机的底边中心，避免远端角点波动。
+                const cv::Vec2d front_mid(
+                    0.5 * (bottom[0][0] + bottom[1][0]),
+                    0.5 * (bottom[0][1] + bottom[1][1]));
+                const cv::Vec2d rear_mid(
+                    0.5 * (bottom[2][0] + bottom[3][0]),
+                    0.5 * (bottom[2][1] + bottom[3][1]));
+                const double front_distance = std::hypot(
+                    front_mid[0] - C_w_[0], front_mid[1] - C_w_[1]);
+                const double rear_distance = std::hypot(
+                    rear_mid[0] - C_w_[0], rear_mid[1] - C_w_[1]);
+                output_center_xy = front_distance <= rear_distance
+                    ? front_mid : rear_mid;
+            }
 
             double theta = 0.0;
             if (cid == 0) {
@@ -959,8 +1006,8 @@ public:
             // 将人员尺寸拉成长条。
             const double output_l = cid == 0 ? dynamic_width : dynamic_length;
             const double output_w = dynamic_width;
-            cuboids.at<float>(i, 0) = static_cast<float>(bottom_center[0]);
-            cuboids.at<float>(i, 1) = static_cast<float>(bottom_center[1]);
+            cuboids.at<float>(i, 0) = static_cast<float>(output_center_xy[0]);
+            cuboids.at<float>(i, 1) = static_cast<float>(output_center_xy[1]);
             cuboids.at<float>(i, 2) = static_cast<float>(
                 z_world + 0.5 * height);
             cuboids.at<float>(i, 3) = static_cast<float>(output_l);
@@ -1010,7 +1057,7 @@ public:
                         direct_quality / (direct_quality + pseudo_quality);
                     const double pseudo_weight = 1.0 - direct_weight;
                     // std::cout<<"ratio: "<<direct_weight<<", "<<pseudo_weight<<std::endl;
-                    for (int k = 0; k < 6; ++k) {
+                    for (int k = cid == 2 ? 2 : 0; k < 6; ++k) {
                         cuboids.at<float>(i, k) = static_cast<float>(
                             direct_weight * cuboids.at<float>(i, k) +
                             pseudo_weight * pseudo_cuboid.at<float>(0, k));
@@ -1062,6 +1109,38 @@ public:
                         cuboids.at<float>(i, 3) /= bicycle_correction.scale_factor;
                         cuboids.at<float>(i, 4) /= bicycle_correction.scale_factor;
                     }
+                }
+            }
+        }
+        for (int i = 0; i < N; ++i) {
+            const int cid = static_cast<int>(std::llround(
+                cuboids.at<float>(i, 7)));
+            if (cid == 0) {
+                if (cuboids.at<float>(i, 3) > 0.0f &&
+                    cuboids.at<float>(i, 3) < 0.2f) {
+                    cuboids.at<float>(i, 3) = 0.4f;
+                }
+                if (cuboids.at<float>(i, 4) > 0.0f &&
+                    cuboids.at<float>(i, 4) < 0.2f) {
+                    cuboids.at<float>(i, 4) = 0.4f;
+                }
+            } else if (cid == 1) {
+                if (cuboids.at<float>(i, 3) > 0.0f &&
+                    cuboids.at<float>(i, 3) < 1.0f) {
+                    cuboids.at<float>(i, 3) = 1.2f;
+                }
+                if (cuboids.at<float>(i, 4) > 0.0f &&
+                    cuboids.at<float>(i, 4) < 0.4f) {
+                    cuboids.at<float>(i, 4) = 0.5f;
+                }
+            } else if (cid == 2) {
+                if (cuboids.at<float>(i, 3) > 0.0f &&
+                    cuboids.at<float>(i, 3) < 2.0f) {
+                    cuboids.at<float>(i, 3) = 2.0f;
+                }
+                if (cuboids.at<float>(i, 4) > 0.0f &&
+                    cuboids.at<float>(i, 4) < 1.0f) {
+                    cuboids.at<float>(i, 4) = 1.5f;
                 }
             }
         }
@@ -1643,6 +1722,38 @@ public:
             }
         }
 
+        for (int i = 0; i < fallback.rows; ++i) {
+            const int cid = static_cast<int>(std::llround(
+                fallback.at<float>(i, 7)));
+            if (cid == 0) {
+                if (fallback.at<float>(i, 3) > 0.0f &&
+                    fallback.at<float>(i, 3) < 0.2f) {
+                    fallback.at<float>(i, 3) = 0.4f;
+                }
+                if (fallback.at<float>(i, 4) > 0.0f &&
+                    fallback.at<float>(i, 4) < 0.2f) {
+                    fallback.at<float>(i, 4) = 0.4f;
+                }
+            } else if (cid == 1) {
+                if (fallback.at<float>(i, 3) > 0.0f &&
+                    fallback.at<float>(i, 3) < 1.0f) {
+                    fallback.at<float>(i, 3) = 1.2f;
+                }
+                if (fallback.at<float>(i, 4) > 0.0f &&
+                    fallback.at<float>(i, 4) < 0.4f) {
+                    fallback.at<float>(i, 4) = 0.5f;
+                }
+            } else if (cid == 2) {
+                if (fallback.at<float>(i, 3) > 0.0f &&
+                    fallback.at<float>(i, 3) < 2.0f) {
+                    fallback.at<float>(i, 3) = 4.0f;
+                }
+                if (fallback.at<float>(i, 4) > 0.0f &&
+                    fallback.at<float>(i, 4) < 1.0f) {
+                    fallback.at<float>(i, 4) = 1.5f;
+                }
+            }
+        }
         return fallback;
     }
 
