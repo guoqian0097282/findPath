@@ -404,9 +404,16 @@ public:
                 double w_use = dyn_w;
                 if (cid == 0) {
                     l_use = w_use;
+                    if (l_use > 0.8) l_use = 0.8;
+                    if (w_use > 0.8) w_use = 0.8;
                 } else if (cid == 1) {
                     if (l_use < 1.0) l_use = 1.2;
+                    if (l_use > 1.8) l_use = 1.8;
                     if (w_use < 0.4) w_use = 0.5;
+                    if (w_use > 0.8) w_use = 0.8;
+                } else if (cid == 2) {
+                    if (l_use > 5.0) l_use = 5.0;
+                    if (w_use > 2.5) w_use = 2.5;
                 }
 
                 cuboids.at<float>(i, 0) = static_cast<float>(cx);
@@ -566,15 +573,25 @@ public:
             }
 
             const double cz = z_base + 0.5 * h;
+            double l_use = cid == 1 && l < 1.0 ? 1.2 : l;
+            double w_use = cid == 1 && w < 0.4 ? 0.5 : w;
+            if (cid == 0) {
+                if (l_use > 0.8) l_use = 0.8;
+                if (w_use > 0.8) w_use = 0.8;
+            } else if (cid == 1) {
+                if (l_use > 1.8) l_use = 1.8;
+                if (w_use > 0.8) w_use = 0.8;
+            } else if (cid == 2) {
+                if (l_use > 5.0) l_use = 5.0;
+                if (w_use > 2.5) w_use = 2.5;
+            }
 
             // 写回成功解出的 cuboid
             cuboids.at<float>(i, 0) = static_cast<float>(cx);
             cuboids.at<float>(i, 1) = static_cast<float>(cy);
             cuboids.at<float>(i, 2) = static_cast<float>(cz);
-            cuboids.at<float>(i, 3) = static_cast<float>(
-                cid == 1 && l < 1.0 ? 1.2 : l);
-            cuboids.at<float>(i, 4) = static_cast<float>(
-                cid == 1 && w < 0.4 ? 0.5 : w);
+            cuboids.at<float>(i, 3) = static_cast<float>(l_use);
+            cuboids.at<float>(i, 4) = static_cast<float>(w_use);
             cuboids.at<float>(i, 5) = static_cast<float>(h);
             // 6,7,8 前面已经填好
         }
@@ -1119,28 +1136,40 @@ public:
                 if (cuboids.at<float>(i, 3) > 0.0f &&
                     cuboids.at<float>(i, 3) < 0.2f) {
                     cuboids.at<float>(i, 3) = 0.4f;
+                } else if (cuboids.at<float>(i, 3) > 0.8f) {
+                    cuboids.at<float>(i, 3) = 0.8f;
                 }
                 if (cuboids.at<float>(i, 4) > 0.0f &&
                     cuboids.at<float>(i, 4) < 0.2f) {
                     cuboids.at<float>(i, 4) = 0.4f;
+                } else if (cuboids.at<float>(i, 4) > 0.8f) {
+                    cuboids.at<float>(i, 4) = 0.8f;
                 }
             } else if (cid == 1) {
                 if (cuboids.at<float>(i, 3) > 0.0f &&
                     cuboids.at<float>(i, 3) < 1.0f) {
                     cuboids.at<float>(i, 3) = 1.2f;
+                } else if (cuboids.at<float>(i, 3) > 1.8f) {
+                    cuboids.at<float>(i, 3) = 1.8f;
                 }
                 if (cuboids.at<float>(i, 4) > 0.0f &&
                     cuboids.at<float>(i, 4) < 0.4f) {
                     cuboids.at<float>(i, 4) = 0.5f;
+                } else if (cuboids.at<float>(i, 4) > 0.8f) {
+                    cuboids.at<float>(i, 4) = 0.8f;
                 }
             } else if (cid == 2) {
                 if (cuboids.at<float>(i, 3) > 0.0f &&
                     cuboids.at<float>(i, 3) < 2.0f) {
                     cuboids.at<float>(i, 3) = 2.0f;
+                } else if (cuboids.at<float>(i, 3) > 5.0f) {
+                    cuboids.at<float>(i, 3) = 5.0f;
                 }
                 if (cuboids.at<float>(i, 4) > 0.0f &&
                     cuboids.at<float>(i, 4) < 1.0f) {
                     cuboids.at<float>(i, 4) = 1.5f;
+                } else if (cuboids.at<float>(i, 4) > 2.5f) {
+                    cuboids.at<float>(i, 4) = 2.5f;
                 }
             }
         }
@@ -1729,28 +1758,40 @@ public:
                 if (fallback.at<float>(i, 3) > 0.0f &&
                     fallback.at<float>(i, 3) < 0.2f) {
                     fallback.at<float>(i, 3) = 0.4f;
+                } else if (fallback.at<float>(i, 3) > 0.8f) {
+                    fallback.at<float>(i, 3) = 0.8f;
                 }
                 if (fallback.at<float>(i, 4) > 0.0f &&
                     fallback.at<float>(i, 4) < 0.2f) {
                     fallback.at<float>(i, 4) = 0.4f;
+                } else if (fallback.at<float>(i, 4) > 0.8f) {
+                    fallback.at<float>(i, 4) = 0.8f;
                 }
             } else if (cid == 1) {
                 if (fallback.at<float>(i, 3) > 0.0f &&
                     fallback.at<float>(i, 3) < 1.0f) {
                     fallback.at<float>(i, 3) = 1.2f;
+                } else if (fallback.at<float>(i, 3) > 1.8f) {
+                    fallback.at<float>(i, 3) = 1.8f;
                 }
                 if (fallback.at<float>(i, 4) > 0.0f &&
                     fallback.at<float>(i, 4) < 0.4f) {
                     fallback.at<float>(i, 4) = 0.5f;
+                } else if (fallback.at<float>(i, 4) > 0.8f) {
+                    fallback.at<float>(i, 4) = 0.8f;
                 }
             } else if (cid == 2) {
                 if (fallback.at<float>(i, 3) > 0.0f &&
                     fallback.at<float>(i, 3) < 2.0f) {
                     fallback.at<float>(i, 3) = 4.0f;
+                } else if (fallback.at<float>(i, 3) > 5.0f) {
+                    fallback.at<float>(i, 3) = 5.0f;
                 }
                 if (fallback.at<float>(i, 4) > 0.0f &&
                     fallback.at<float>(i, 4) < 1.0f) {
                     fallback.at<float>(i, 4) = 1.5f;
+                } else if (fallback.at<float>(i, 4) > 2.5f) {
+                    fallback.at<float>(i, 4) = 2.5f;
                 }
             }
         }
