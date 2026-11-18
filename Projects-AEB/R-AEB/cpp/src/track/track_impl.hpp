@@ -60,6 +60,7 @@ struct CuboidTrack {
     int stable_cnt = 0;
     int missed = 0;
     int hits = 0;
+    int consecutive_hits = 0;
 
     int age() const {
         return frame_id - start_frame + 1;
@@ -981,6 +982,7 @@ inline CuboidTracker::TrackPtr CuboidTracker::activate(const cv::Vec<float, 9>& 
     trk->stable_cnt = 0;
     trk->missed = 0;
     trk->hits = 1;
+    trk->consecutive_hits = 1;
     return trk;
 }
 
@@ -1083,6 +1085,8 @@ inline void CuboidTracker::update_track(
     trk->meas_vx = vmx;
     trk->meas_vy = vmy;
     trk->has_meas_velocity = has_meas_velocity;
+    trk->consecutive_hits = trk->missed > 0
+        ? 1 : trk->consecutive_hits + 1;
     trk->missed = 0;
 
     if (has_meas_velocity) {
@@ -1362,7 +1366,13 @@ inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_
     for (const int i : u_rt) {
         const auto& trk = rem_tracked[i];
         trk->state = TRACK_LOST;
-        trk->missed += 1;
+        if (timestamp == trk->last_timestamp) {
+            trk->missed += 1;
+            trk->last_meas_valid = false;
+            trk->has_meas_velocity = false;
+        } else {
+            predict_track_without_measure(trk, timestamp);
+        }
         lost_now.push_back(trk);
     }
 
@@ -1451,9 +1461,15 @@ inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_
     }
 
     std::vector<TrackPtr> active;
-    active.reserve(tracked_.size());
+    active.reserve(tracked_.size() + lost_.size());
     for (const auto& t : tracked_) {
         if (t->state == TRACK_NEW || t->state == TRACK_TRACKED) {
+            active.push_back(t);
+        }
+    }
+    for (const auto& t : lost_) {
+        if (t->state == TRACK_LOST && t->consecutive_hits > 10 &&
+            t->missed > 0 && t->missed <= 10) {
             active.push_back(t);
         }
     }
@@ -1473,19 +1489,23 @@ inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_
 
     for (int i = 0; i < n; ++i) {
         const auto& trk = active[i];
+        const bool pure_prediction = trk->state == TRACK_LOST;
 
         track_info.at<int>(i, 0) = trk->track_id;
         track_info.at<int>(i, 1) = trk->state;
-        track_info.at<int>(i, 2) = trk->age();
-        track_info.at<int>(i, 3) = trk->idx;
+        track_info.at<int>(i, 2) = trk->age() + (pure_prediction ? trk->missed : 0);
+        track_info.at<int>(i, 3) = pure_prediction ? -1 : trk->idx;
 
         float* row_c = tracked_cuboids.ptr<float>(i);
         for (int j = 0; j < 9; ++j) {
             row_c[j] = trk->cuboid[j];
         }
+        if (pure_prediction) {
+            row_c[6] = 0.0f;
+        }
 
         float* row_raw = tracked_cuboids_raw.ptr<float>(i);
-        if (trk->idx >= 0 && trk->idx < n_det) {
+        if (!pure_prediction && trk->idx >= 0 && trk->idx < n_det) {
             const float* src = arr.ptr<float>(trk->idx);
             for (int j = 0; j < 9; ++j) {
                 row_raw[j] = src[j];
@@ -1495,23 +1515,30 @@ inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_
                 row_raw[j] = trk->cuboid[j];
             }
         }
+        if (pure_prediction) {
+            row_raw[6] = 0.0f;
+        }
 
         const double vx_e = trk->x(2, 0);
         const double vy_e = trk->x(3, 0);
         double dx_comp = 0.0;
         double dy_comp = 0.0;
-        std::tie(dx_comp, dy_comp) = position_comp_delta(
-            trk,
-            vx_e,
-            vy_e,
-            trk->state,
-            trk->motion_state
-        );
+        if (!pure_prediction) {
+            std::tie(dx_comp, dy_comp) = position_comp_delta(
+                trk,
+                vx_e,
+                vy_e,
+                trk->state,
+                trk->motion_state
+            );
+        }
         tracked_cuboids.at<float>(i, 0) = static_cast<float>(tracked_cuboids.at<float>(i, 0) + dx_comp);
         tracked_cuboids.at<float>(i, 1) = static_cast<float>(tracked_cuboids.at<float>(i, 1) + dy_comp);
 
-        double vx_out = trk->out_vel_valid ? trk->out_vx : vx_e;
-        double vy_out = trk->out_vel_valid ? trk->out_vy : vy_e;
+        double vx_out = pure_prediction
+            ? vx_e : (trk->out_vel_valid ? trk->out_vx : vx_e);
+        double vy_out = pure_prediction
+            ? vy_e : (trk->out_vel_valid ? trk->out_vy : vy_e);
         if (mode == "world") {
             const double vx_base = vx_out;
             const double vy_base = vy_out;
