@@ -49,6 +49,14 @@ public:
         f_ = get_number(cyl_cam, "focal_u");
         cu_ = get_number(cyl_cam, "center_u");
         cv_ = get_number(cyl_cam, "center_v");
+        auto width_it = cyl_cam.find("image_width");
+        auto height_it = cyl_cam.find("image_height");
+        image_width_ = width_it != cyl_cam.end() && width_it->second.is_number()
+            ? std::max(1, width_it->second.get<int>())
+            : 960;
+        image_height_ = height_it != cyl_cam.end() && height_it->second.is_number()
+            ? std::max(1, height_it->second.get<int>())
+            : 480;
 
         R_w2c_ = parse_mat33(get_obj(cyl_cam, "R_act"));
         R_c2w_ = R_w2c_.t();
@@ -120,6 +128,9 @@ public:
             return false;
         }
         const double lam = (z_world - C_w_[2]) / dz;
+        if (!std::isfinite(lam) || lam <= 0.0) {
+            return false;
+        }
         cv::Vec3d Xw = C_w_ + lam * d_w;
         out_xyz = cv::Vec3d(Xw[0], Xw[1], z_world);
         return true;
@@ -228,7 +239,7 @@ public:
                 continue;
             }
             cuboids.at<float>(i, 0) = static_cast<float>(
-                x - std::copysign(1.0, delta_x));
+                x - std::copysign(0.2, delta_x));
         }
     }
 
@@ -402,6 +413,7 @@ public:
                 const double h_use = h;
                 double l_use = l;
                 double w_use = dyn_w;
+                /*
                 if (cid == 0) {
                     l_use = w_use;
                     if (l_use > 0.8) l_use = 0.8;
@@ -415,6 +427,7 @@ public:
                     if (l_use > 5.0) l_use = 5.0;
                     if (w_use > 2.5) w_use = 2.5;
                 }
+                */
 
                 cuboids.at<float>(i, 0) = static_cast<float>(cx);
                 cuboids.at<float>(i, 1) = static_cast<float>(cy);
@@ -573,8 +586,9 @@ public:
             }
 
             const double cz = z_base + 0.5 * h;
-            double l_use = cid == 1 && l < 1.0 ? 1.2 : l;
-            double w_use = cid == 1 && w < 0.4 ? 0.5 : w;
+            double l_use = l;
+            double w_use = w;
+            /*
             if (cid == 0) {
                 if (l_use > 0.8) l_use = 0.8;
                 if (w_use > 0.8) w_use = 0.8;
@@ -585,6 +599,7 @@ public:
                 if (l_use > 5.0) l_use = 5.0;
                 if (w_use > 2.5) w_use = 2.5;
             }
+            */
 
             // 写回成功解出的 cuboid
             cuboids.at<float>(i, 0) = static_cast<float>(cx);
@@ -886,6 +901,40 @@ public:
                     pseudo_obj, z_world, cv::Mat());
             }
 
+            // Reject clipped or geometrically unusable 3D boxes before any
+            // prior-height fallback can turn a bad keypoint into a fake object.
+            constexpr double kBorderMargin = 8.0;
+            bool points_layout_valid = true;
+            std::array<cv::Vec2d, 8> uv_points;
+            for (int k = 0; k < 8; ++k) {
+                uv_points[k] = read_uv(k);
+                const double u = uv_points[k][0];
+                const double v = uv_points[k][1];
+                if (!std::isfinite(u) || !std::isfinite(v) ||
+                    u < kBorderMargin ||
+                    u >= image_width_ - kBorderMargin ||
+                    v < kBorderMargin ||
+                    v >= image_height_ - kBorderMargin) {
+                    points_layout_valid = false;
+                    break;
+                }
+            }
+
+            if (points_layout_valid) {
+                for (int k = 0; k < 4; ++k) {
+                    const double bottom_v = uv_points[k][1];
+                    const double top_v = uv_points[k + 4][1];
+                    if (top_v >= bottom_v - 8.0) {
+                        points_layout_valid = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!points_layout_valid) {
+                continue;
+            }
+
             std::array<cv::Vec3d, 4> bottom;
             std::vector<double> heights;
             bool valid = std::isfinite(z_world);
@@ -935,13 +984,10 @@ public:
             }
 
             if (!valid || heights.size() != 4) {
-                if (!std::isfinite(prior_h) || prior_h <= 1e-4) {
-                    if (!pseudo_cuboid.empty()) {
-                        pseudo_cuboid.row(0).copyTo(cuboids.row(i));
-                    }
-                    continue;
+                if (!pseudo_cuboid.empty()) {
+                    pseudo_cuboid.row(0).copyTo(cuboids.row(i));
                 }
-                heights.assign(4, prior_h);
+                continue;
             }
 
             std::sort(heights.begin(), heights.end());
@@ -1129,6 +1175,7 @@ public:
                 }
             }
         }
+        /*
         for (int i = 0; i < N; ++i) {
             const int cid = static_cast<int>(std::llround(
                 cuboids.at<float>(i, 7)));
@@ -1173,6 +1220,7 @@ public:
                 }
             }
         }
+        */
         return cuboids;
     }
 
@@ -1751,6 +1799,7 @@ public:
             }
         }
 
+        /*
         for (int i = 0; i < fallback.rows; ++i) {
             const int cid = static_cast<int>(std::llround(
                 fallback.at<float>(i, 7)));
@@ -1795,6 +1844,7 @@ public:
                 }
             }
         }
+        */
         return fallback;
     }
 
@@ -2566,6 +2616,8 @@ private:
     double cu_{};
     double cv_{};
     double tan_pitch_{};
+    int image_width_{960};
+    int image_height_{480};
     cv::Matx33d R_w2c_{};
     cv::Matx33d R_c2w_{};
     cv::Vec3d t_{};
