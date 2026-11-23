@@ -37,7 +37,7 @@ def h264_to_jpg_opencv(video_path, output_dir, extract_interval=1, max_frames=No
     frame_count = 0
     saved_count = 0
     # 使用 5 位数字作为文件名编号
-    num_digits = len(str(total_frames))
+    num_digits = 6; #len(str(total_frames))
     
     while True:
         ret, frame = cap.read()
@@ -47,7 +47,7 @@ def h264_to_jpg_opencv(video_path, output_dir, extract_interval=1, max_frames=No
         # 按间隔提取
         if frame_count % extract_interval == 0:
             # 生成文件名
-            filename = f"frame_{str(frame_count).zfill(num_digits)}.jpg"
+            filename = f"frame_{str(frame_count+1).zfill(num_digits)}.jpg"
             filepath = os.path.join(output_dir, filename)
             
             # 保存为 JPG
@@ -80,7 +80,7 @@ if __name__ == "__main__":
     
     # 方式2：提取所有帧
     h264_to_jpg_opencv(
-        video_path="/home/gq/guoqian/Projects-AEB/M112/front_calib/General/VID_20240901_024736_GEN_1.h264",
-        output_dir="/home/gq/guoqian/Projects-AEB/M112/front_calib/General/image/",
-        extract_interval=10
+        video_path="/home/gq/guoqian/Projects-AEB/test/1120/6/AEB_20261120_091629.h264",
+        output_dir="/home/gq/guoqian/Projects-AEB/test/1120/6/ori/",
+        extract_interval=1
     )

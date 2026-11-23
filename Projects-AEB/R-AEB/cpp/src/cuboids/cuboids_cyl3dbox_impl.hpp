@@ -1026,21 +1026,6 @@ public:
                 bottom_center[1] += 0.25 * p[1];
             }
             cv::Vec2d output_center_xy(bottom_center[0], bottom_center[1]);
-            if (cid == 2) {
-                // 车辆位置取更靠近相机的底边中心，避免远端角点波动。
-                const cv::Vec2d front_mid(
-                    0.5 * (bottom[0][0] + bottom[1][0]),
-                    0.5 * (bottom[0][1] + bottom[1][1]));
-                const cv::Vec2d rear_mid(
-                    0.5 * (bottom[2][0] + bottom[3][0]),
-                    0.5 * (bottom[2][1] + bottom[3][1]));
-                const double front_distance = std::hypot(
-                    front_mid[0] - C_w_[0], front_mid[1] - C_w_[1]);
-                const double rear_distance = std::hypot(
-                    rear_mid[0] - C_w_[0], rear_mid[1] - C_w_[1]);
-                output_center_xy = front_distance <= rear_distance
-                    ? front_mid : rear_mid;
-            }
 
             double theta = 0.0;
             if (cid == 0) {
