@@ -43,8 +43,8 @@ static const std::string kConfigPath = "/home/gq/guoqian/Projects-AEB/M310/confi
 static const std::string kModelPath = "/home/gq/guoqian/Projects-AEB/R-AEB/assets/RAEB/TI_lyl.onnx";
 
 // 修改为文件夹路径
-static const fs::path k3dImageDir = "/home/gq/guoqian/Projects-AEB/test/1119/errorPerson/ori";    //R-AEB/python/undis/out";
-static const fs::path k3dDetectionDir = "/home/gq/guoqian/Projects-AEB/test/1119/errorPerson/3d/";
+static const fs::path k3dImageDir = "/home/gq/guoqian/Projects-AEB/test/bicycle_image/";    //R-AEB/python/undis/out";
+static const fs::path k3dDetectionDir = "/home/gq/guoqian/Projects-AEB/3Dmodle/out_onnx/";
 static const fs::path k3dOutputDir = "./vis/";
 
 static const std::string kVis3dImagePrefix = "raeb_vis_3d_";
@@ -214,6 +214,7 @@ struct RaebVelocitySmoothState
     float vy{0.0f};
     int mode{-1};
     std::int64_t timestamp{0};
+    int missed_frames{0};
     bool valid{false};
 };
 
@@ -223,9 +224,20 @@ static void SmoothTrackedCuboidsVelocity(
     const cv::Mat &track_info,
     cv::Mat &tracked_cuboids_vel)
 {
+    constexpr int kMaxSmoothMissedFrames = 3;
     if (tracked_cuboids_vel.empty() || track_info.empty())
     {
-        g_RAEB_VEL_SMOOTH_STATES.clear();
+        for (auto it = g_RAEB_VEL_SMOOTH_STATES.begin(); it != g_RAEB_VEL_SMOOTH_STATES.end();)
+        {
+            if (++it->second.missed_frames > kMaxSmoothMissedFrames)
+            {
+                it = g_RAEB_VEL_SMOOTH_STATES.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
         return;
     }
     if (track_info.type() != CV_32S || tracked_cuboids_vel.type() != CV_32F ||
@@ -251,7 +263,7 @@ static void SmoothTrackedCuboidsVelocity(
     constexpr int kMotionStatic = 1;
 
     constexpr float kMovingAlpha = 0.30f;
-    constexpr float kLostAlpha = 0.12f;
+    constexpr float kReacquireAlpha = 0.12f;
     constexpr float kStaticAlpha = 0.18f;
     constexpr float kStaticDeadbandMps = 0.25f;
     constexpr float kOutputZeroMps = 0.05f;
@@ -292,10 +304,16 @@ static void SmoothTrackedCuboidsVelocity(
             state.timestamp = timestamp;
             state.valid = true;
         }
+        else if (track_state == kTrackLost)
+        {
+            state.mode = mode;
+            state.timestamp = timestamp;
+            state.valid = true;
+        }
         else
         {
-            const float alpha = track_state == kTrackLost
-                                    ? kLostAlpha
+            const float alpha = state.missed_frames > 0
+                                    ? kReacquireAlpha
                                     : (motion_state == kMotionStatic ? kStaticAlpha : kMovingAlpha);
             float smooth_vx = state.vx + alpha * (target_vx - state.vx);
             float smooth_vy = state.vy + alpha * (target_vy - state.vy);
@@ -316,6 +334,7 @@ static void SmoothTrackedCuboidsVelocity(
             state.timestamp = timestamp;
             state.valid = true;
         }
+        state.missed_frames = 0;
 
         tracked_cuboids_vel.at<float>(i, kVelXCol) = state.vx;
         tracked_cuboids_vel.at<float>(i, kVelYCol) = state.vy;
@@ -325,7 +344,14 @@ static void SmoothTrackedCuboidsVelocity(
     {
         if (live_ids.find(it->first) == live_ids.end())
         {
-            it = g_RAEB_VEL_SMOOTH_STATES.erase(it);
+            if (++it->second.missed_frames > kMaxSmoothMissedFrames)
+            {
+                it = g_RAEB_VEL_SMOOTH_STATES.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
         else
         {
@@ -724,7 +750,7 @@ static int batch_process_3d_cases()
         30,     // track_buffer
         30,     // frame_rate
         80.0f, // default_dt_ms
-        1e-6f,  // timestamp_scale
+        1e-6f,  // timestamp_scale (timestamps are in milliseconds)
         4.0f,   // center_gate_main_m
         5.5f,   // center_gate_low_m
         0.55f,  // weight_cls_main
@@ -818,8 +844,6 @@ static int batch_process_3d_cases()
     // 用于画图的数据收集
     TrackVelMap tracks_vel;
     TrackVelMap tracks_position;
-    int frame_index = 0;
-
     for (size_t idx = 0; idx < image_paths.size(); ++idx)
     {
         const auto &img_path = image_paths[idx];
@@ -881,7 +905,7 @@ static int batch_process_3d_cases()
         cv::Mat tracked_cuboids_raw;
         cv::Mat tracked_cuboids;
         cv::Mat tracked_cuboids_vel;
-        timestamp = static_cast<double>(frame_index) * 100.0; // 假设每帧间隔为100ms
+        timestamp = static_cast<double>(idx) * 100.0; // 假设每帧间隔为100ms
         double ego_yaw = 0.0;
 
         std::tie(track_info, tracked_cuboids_raw, tracked_cuboids, tracked_cuboids_vel) =
@@ -929,7 +953,7 @@ static int batch_process_3d_cases()
 
                 TrackVelocityPoint point;
                 // use current frame index 'i' as the frame number
-                point.frame = static_cast<int>(frame_index);
+                point.frame = static_cast<int>(idx);
                 point.vx = g_track_vel.at<float>(r, 2);
                 point.vy = g_track_vel.at<float>(r, 3);
                 point.vz = 0.0; // if available
@@ -944,7 +968,6 @@ static int batch_process_3d_cases()
         }
 
         ++success_count;
-        ++frame_index;
     }
 
     // 画图：速度分量和位置分量

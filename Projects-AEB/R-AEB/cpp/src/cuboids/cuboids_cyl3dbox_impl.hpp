@@ -913,8 +913,7 @@ public:
                 if (!std::isfinite(u) || !std::isfinite(v) ||
                     u < kBorderMargin ||
                     u >= image_width_ - kBorderMargin ||
-                    v < kBorderMargin ||
-                    v >= image_height_ - kBorderMargin) {
+                    v < kBorderMargin) {
                     points_layout_valid = false;
                     break;
                 }

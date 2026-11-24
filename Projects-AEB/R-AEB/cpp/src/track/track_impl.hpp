@@ -53,6 +53,9 @@ struct CuboidTrack {
     double out_vx = 0.0;
     double out_vy = 0.0;
     bool out_vel_valid = false;
+    double prediction_vx = 0.0;
+    double prediction_vy = 0.0;
+    bool prediction_velocity_valid = false;
     int comp_freeze = 0;
     int maneuver_left = 0;
 
@@ -265,6 +268,7 @@ private:
     double vel_meas_innov_for_max_ = 1.2;
     double output_vel_alpha_ = 0.25;
     double output_vel_alpha_lost_ = 0.10;
+    double output_vel_alpha_reacquire_ = 0.12;
 
     double pos_comp_sec_ = 0.06;
     double pos_comp_min_speed_ = 0.15;
@@ -721,7 +725,9 @@ inline void CuboidTracker::update_output_velocity(
     double vy,
     bool has_measurement
 ) const {
-    const double alpha = has_measurement ? output_vel_alpha_ : output_vel_alpha_lost_;
+    const double alpha = !has_measurement
+        ? output_vel_alpha_lost_
+        : (trk->missed > 0 ? output_vel_alpha_reacquire_ : output_vel_alpha_);
     if (!trk->out_vel_valid) {
         trk->out_vx = vx;
         trk->out_vy = vy;
@@ -1085,6 +1091,7 @@ inline void CuboidTracker::update_track(
     trk->meas_vx = vmx;
     trk->meas_vy = vmy;
     trk->has_meas_velocity = has_meas_velocity;
+    trk->prediction_velocity_valid = false;
     trk->consecutive_hits = trk->missed > 0
         ? 1 : trk->consecutive_hits + 1;
     trk->missed = 0;
@@ -1116,6 +1123,10 @@ inline void CuboidTracker::predict_track_without_measure(const TrackPtr& trk, st
     cv::Matx<double, 4, 1> x_pre{};
     cv::Matx<double, 4, 4> P_pre{};
     kf_predict(trk->x, trk->P, dt, x_pre, P_pre);
+    if (trk->prediction_velocity_valid) {
+        x_pre(2, 0) = trk->prediction_vx;
+        x_pre(3, 0) = trk->prediction_vy;
+    }
     x_pre = clip_speed(x_pre);
 
     trk->x = x_pre;
@@ -1365,6 +1376,11 @@ inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_
     }
     for (const int i : u_rt) {
         const auto& trk = rem_tracked[i];
+        if (!trk->prediction_velocity_valid) {
+            trk->prediction_vx = trk->x(2, 0);
+            trk->prediction_vy = trk->x(3, 0);
+            trk->prediction_velocity_valid = true;
+        }
         trk->state = TRACK_LOST;
         if (timestamp == trk->last_timestamp) {
             trk->missed += 1;
@@ -1519,8 +1535,12 @@ inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_
             row_raw[6] = 0.0f;
         }
 
-        const double vx_e = trk->x(2, 0);
-        const double vy_e = trk->x(3, 0);
+        const double vx_e = pure_prediction && trk->prediction_velocity_valid
+            ? trk->prediction_vx
+            : trk->x(2, 0);
+        const double vy_e = pure_prediction && trk->prediction_velocity_valid
+            ? trk->prediction_vy
+            : trk->x(3, 0);
         double dx_comp = 0.0;
         double dy_comp = 0.0;
         if (!pure_prediction) {
