@@ -26,6 +26,7 @@ static constexpr int TRACK_NEW = 0;
 static constexpr int TRACK_TRACKED = 1;
 static constexpr int TRACK_LOST = 2;
 static constexpr int TRACK_REMOVED = 3;
+static constexpr int kCarClassId = 2;
 
 static constexpr int MOTION_UNKNOWN = 0;
 static constexpr int MOTION_STATIC = 1;
@@ -1488,7 +1489,8 @@ inline std::tuple<cv::Mat, cv::Mat, cv::Mat, cv::Mat> CuboidTracker::update_and_
         }
     }
     for (const auto& t : lost_) {
-        if (t->state == TRACK_LOST && t->consecutive_hits > 10 &&
+        if (t->state == TRACK_LOST && cls_to_int(t->cuboid[7]) != kCarClassId &&
+            t->consecutive_hits > 10 &&
             t->missed > 0 && t->missed <= 10) {
             active.push_back(t);
         }
