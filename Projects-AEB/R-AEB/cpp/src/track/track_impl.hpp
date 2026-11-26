@@ -933,6 +933,10 @@ inline cv::Mat CuboidTracker::build_cost(
             if (dist > center_gate_m) {
                 continue;
             }
+            // Avoid binding weak detections that would be clipped by update_track.
+            if (timestamp.has_value() && det[6] < track_high_thresh_ && dist > max_innovation_m_) {
+                continue;
+            }
 
             const double norm = std::max(1e-3, 0.5 * (tdiag + ddiag));
             const double center_cost = clip(dist / (norm * 2.0), 0.0, 1.5);
